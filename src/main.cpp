@@ -7,25 +7,24 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <time.h>
+#include <NimBLEDevice.h>
 #if __has_include("secrets.h")
 #include "secrets.h"
 #else
 #error "Copy src/secrets.h.example to src/secrets.h and fill in your credentials"
 #endif
+#include "config.h"
 
-// --- Hardware Config ---
+// --- Hardware & Display Config ---
 
-#define HARDWARE_TYPE MD_MAX72XX::FC16_HW
-#define MAX_DEVICES 4
-#define DIN_PIN 11
-#define CLK_PIN 12
-#define CS_PIN 10
-#define TOUCH_PIN 14
+#define HARDWARE_TYPE   MD_MAX72XX::FC16_HW
+#define MAX_DEVICES     4
+#define DIN_PIN         11
+#define CLK_PIN         12
+#define CS_PIN          10
+#define TOUCH_PIN       14
 #define TOUCH_THRESHOLD 30000
-
-// --- Display Settings ---
-
-#define SCROLL_SPEED 50
+#define SCROLL_SPEED    50
 
 // --- Fetch Limits ---
 
@@ -52,15 +51,9 @@ void scrollText(const char *msg)
   display.displayScroll(msg, PA_LEFT, PA_SCROLL_LEFT, SCROLL_SPEED);
 }
 
-// --- Messages ---
+Preferences prefs;
 
-const char *fallbackMessages[] = {
-    "Did you drink water?",
-    "Take a break!",
-    "Stand up and stretch",
-    "How are you doing?",
-};
-const int fallbackCount = sizeof(fallbackMessages) / sizeof(fallbackMessages[0]);
+// --- Messages ---
 
 char messageStore[MAX_MESSAGES][MAX_STRING_LEN + 1];
 int messageCount = 0;
@@ -78,13 +71,221 @@ const char *getMessage(int idx)
   return fallbackMessages[idx % fallbackCount];
 }
 
+void saveMessagesToNVS()
+{
+  prefs.begin("msgs", false);
+  prefs.putInt("count", messageCount);
+  for (int i = 0; i < messageCount; i++)
+  {
+    char key[8];
+    snprintf(key, sizeof(key), "m%d", i);
+    prefs.putString(key, messageStore[i]);
+  }
+  prefs.end();
+  Serial.printf("Saved %d messages to NVS\n", messageCount);
+}
+
+void loadMessagesFromNVS()
+{
+  prefs.begin("msgs", true);
+  int count = prefs.getInt("count", 0);
+  if (count > 0 && count <= MAX_MESSAGES)
+  {
+    for (int i = 0; i < count; i++)
+    {
+      char key[8];
+      snprintf(key, sizeof(key), "m%d", i);
+      prefs.getString(key, messageStore[i], MAX_STRING_LEN);
+    }
+    prefs.end();
+    messageCount = count;
+    Serial.printf("Loaded %d messages from NVS\n", count);
+  }
+  else
+  {
+    prefs.end();
+    Serial.println("No messages in NVS, using fallbacks");
+  }
+}
+
 // --- Stocks ---
+
+#define MAX_TICKER_LEN 16
+
+char nvsTickers[MAX_STOCKS][MAX_TICKER_LEN];
+int nvsTickerCount = 0;
 
 char stockDisplay[MAX_STOCKS][MAX_STRING_LEN + 1];
 int stockCount = 0;
 int currentStock = 0;
 
-Preferences prefs;
+void saveTickersToNVS()
+{
+  prefs.begin("tickers", false);
+  prefs.putInt("count", nvsTickerCount);
+  for (int i = 0; i < nvsTickerCount; i++)
+  {
+    char key[8];
+    snprintf(key, sizeof(key), "t%d", i);
+    prefs.putString(key, nvsTickers[i]);
+  }
+  prefs.end();
+  Serial.printf("Saved %d tickers to NVS\n", nvsTickerCount);
+}
+
+void loadTickersFromNVS()
+{
+  prefs.begin("tickers", true);
+  int count = prefs.getInt("count", 0);
+  if (count > 0 && count <= MAX_STOCKS)
+  {
+    for (int i = 0; i < count; i++)
+    {
+      char key[8];
+      snprintf(key, sizeof(key), "t%d", i);
+      prefs.getString(key, nvsTickers[i], MAX_TICKER_LEN);
+    }
+    prefs.end();
+    nvsTickerCount = count;
+    Serial.printf("Loaded %d tickers from NVS\n", count);
+  }
+  else
+  {
+    prefs.end();
+    // First boot: seed from secrets.h defaults
+    for (int i = 0; i < stockTickerCount && i < MAX_STOCKS; i++)
+    {
+      strncpy(nvsTickers[i], stockTickers[i], MAX_TICKER_LEN - 1);
+      nvsTickers[i][MAX_TICKER_LEN - 1] = '\0';
+    }
+    nvsTickerCount = stockTickerCount;
+    saveTickersToNVS();
+    Serial.printf("Seeded %d tickers from defaults\n", nvsTickerCount);
+  }
+}
+
+// --- BLE ---
+
+#define BLE_DEVICE_NAME       "LED-Ticker"
+#define BLE_SERVICE_UUID      "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define BLE_TICKER_CHAR_UUID  "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+#define BLE_MODE_CHAR_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26a9"
+#define BLE_MSGS_CHAR_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26aa"
+#define BLE_CMD_CHAR_UUID     "beb5483e-36e1-4688-b7f5-ea07361b26ab"
+#define BLE_TICKER_BUF_LEN    (MAX_STOCKS * (MAX_TICKER_LEN + 1))
+#define BLE_MSGS_BUF_LEN      512
+
+volatile bool tickerUpdatePending = false;
+volatile bool modeUpdatePending   = false;
+volatile bool msgsUpdatePending   = false;
+volatile bool cmdPending          = false;
+
+char pendingTickerStr[BLE_TICKER_BUF_LEN];
+char pendingModeStr[16];
+char pendingMsgsStr[BLE_MSGS_BUF_LEN];
+char pendingCmd[16];
+
+// Minimum ms between writes that trigger network activity
+#define BLE_FETCH_COOLDOWN_MS 10000
+volatile unsigned long lastBLEFetchMs = 0;
+
+class TickerCallbacks : public NimBLECharacteristicCallbacks
+{
+  void onWrite(NimBLECharacteristic *pChar) override
+  {
+    if (millis() - lastBLEFetchMs < BLE_FETCH_COOLDOWN_MS)
+    {
+      Serial.println("BLE tickers: cooldown, ignoring");
+      return;
+    }
+    std::string val = pChar->getValue();
+    if (val.length() > 0 && val.length() < BLE_TICKER_BUF_LEN)
+    {
+      memcpy(pendingTickerStr, val.c_str(), val.length());
+      pendingTickerStr[val.length()] = '\0';
+      tickerUpdatePending = true;
+      lastBLEFetchMs = millis();
+      Serial.printf("BLE tickers: \"%s\"\n", pendingTickerStr);
+    }
+  }
+};
+
+class ModeCallbacks : public NimBLECharacteristicCallbacks
+{
+  void onWrite(NimBLECharacteristic *pChar) override
+  {
+    std::string val = pChar->getValue();
+    if (val.length() > 0 && val.length() < sizeof(pendingModeStr))
+    {
+      memcpy(pendingModeStr, val.c_str(), val.length());
+      pendingModeStr[val.length()] = '\0';
+      modeUpdatePending = true;
+      Serial.printf("BLE mode: \"%s\"\n", pendingModeStr);
+    }
+  }
+};
+
+class MsgsCallbacks : public NimBLECharacteristicCallbacks
+{
+  void onWrite(NimBLECharacteristic *pChar) override
+  {
+    std::string val = pChar->getValue();
+    if (val.length() > 0 && val.length() < BLE_MSGS_BUF_LEN)
+    {
+      memcpy(pendingMsgsStr, val.c_str(), val.length());
+      pendingMsgsStr[val.length()] = '\0';
+      msgsUpdatePending = true;
+      Serial.printf("BLE messages: %d bytes\n", val.length());
+    }
+  }
+};
+
+class CmdCallbacks : public NimBLECharacteristicCallbacks
+{
+  void onWrite(NimBLECharacteristic *pChar) override
+  {
+    std::string val = pChar->getValue();
+    if (val.length() == 0 || val.length() >= sizeof(pendingCmd))
+      return;
+
+    // reload and reset trigger network activity — apply cooldown
+    bool fetchCmd = (val == "reload" || val == "reset");
+    if (fetchCmd && millis() - lastBLEFetchMs < BLE_FETCH_COOLDOWN_MS)
+    {
+      Serial.println("BLE cmd: cooldown, ignoring");
+      return;
+    }
+
+    memcpy(pendingCmd, val.c_str(), val.length());
+    pendingCmd[val.length()] = '\0';
+    cmdPending = true;
+    if (fetchCmd) lastBLEFetchMs = millis();
+    Serial.printf("BLE cmd: \"%s\"\n", pendingCmd);
+  }
+};
+
+void initBLE()
+{
+  NimBLEDevice::init(BLE_DEVICE_NAME);
+  NimBLEDevice::setMTU(512);
+  NimBLEServer *pServer = NimBLEDevice::createServer();
+  NimBLEService *pService = pServer->createService(BLE_SERVICE_UUID);
+
+  pService->createCharacteristic(BLE_TICKER_CHAR_UUID, NIMBLE_PROPERTY::WRITE)
+    ->setCallbacks(new TickerCallbacks());
+  pService->createCharacteristic(BLE_MODE_CHAR_UUID, NIMBLE_PROPERTY::WRITE)
+    ->setCallbacks(new ModeCallbacks());
+  pService->createCharacteristic(BLE_MSGS_CHAR_UUID, NIMBLE_PROPERTY::WRITE)
+    ->setCallbacks(new MsgsCallbacks());
+  pService->createCharacteristic(BLE_CMD_CHAR_UUID, NIMBLE_PROPERTY::WRITE)
+    ->setCallbacks(new CmdCallbacks());
+
+  pService->start();
+  NimBLEAdvertising *pAdv = NimBLEDevice::getAdvertising();
+  pAdv->addServiceUUID(BLE_SERVICE_UUID);
+  pAdv->start();
+  Serial.println("BLE advertising as " BLE_DEVICE_NAME);
+}
 
 void saveStocksToCache()
 {
@@ -160,20 +361,18 @@ bool isMarketOpen()
   if (t.tm_wday == 0 || t.tm_wday == 6)
     return false;
 
-  const int MARKET_OPEN = 9 * 60 + 30;
+  const int MARKET_OPEN  = 9 * 60 + 30;
   const int MARKET_CLOSE = 16 * 60;
   int minutes = t.tm_hour * 60 + t.tm_min;
-  bool open = minutes >= MARKET_OPEN && minutes < MARKET_CLOSE;
-
-  return open;
+  return minutes >= MARKET_OPEN && minutes < MARKET_CLOSE;
 }
 
-void fetchStocks()
+void fetchStocks(bool force = false)
 {
   if (WiFi.status() != WL_CONNECTED)
     return;
 
-  if (!isMarketOpen())
+  if (!force && !isMarketOpen())
   {
     if (stockCount == 0)
       loadStocksFromCache();
@@ -186,20 +385,20 @@ void fetchStocks()
   http.setConnectTimeout(5000);
   http.setTimeout(5000);
 
-  for (int i = 0; i < stockTickerCount && count < MAX_STOCKS; i++)
+  for (int i = 0; i < nvsTickerCount && count < MAX_STOCKS; i++)
   {
     char url[256];
     snprintf(url, sizeof(url),
              "https://finnhub.io/api/v1/quote?symbol=%s&token=%s",
-             stockTickers[i], FINNHUB_API_KEY);
+             nvsTickers[i], FINNHUB_API_KEY);
 
-    Serial.printf("Fetching stock: %s\n", stockTickers[i]);
+    Serial.printf("Fetching stock: %s\n", nvsTickers[i]);
     http.begin(url);
 
     int code = http.GET();
     if (code != 200)
     {
-      Serial.printf("Stock HTTP error: %d for %s\n", code, stockTickers[i]);
+      Serial.printf("Stock HTTP error: %d for %s\n", code, nvsTickers[i]);
       http.end();
       continue;
     }
@@ -222,7 +421,7 @@ void fetchStocks()
 
     const char* sign = change >= 0 ? "(+)" : "(-)";
     snprintf(stockDisplay[count], MAX_STRING_LEN,
-             "%s $%.2f %s", stockTickers[i], current, sign);
+             "%s $%.2f %s", nvsTickers[i], current, sign);
 
     Serial.printf("Stock: %s\n", stockDisplay[count]);
     count++;
@@ -257,7 +456,6 @@ void checkTouch()
 }
 
 // --- Display Rotation ---
-
 
 void showNextMsg()
 {
@@ -307,97 +505,141 @@ void connectWifi()
   }
 }
 
-// --- Fetch Messages ---
+// --- BLE Apply ---
 
-bool parseMessages(const String &body)
+void applyPendingCmd()
 {
-  JsonDocument doc;
-  DeserializationError err = deserializeJson(doc, body);
-  if (err)
-  {
-    Serial.printf("JSON parse error: %s\n", err.c_str());
-    return false;
-  }
+  cmdPending = false;
 
-  if (!doc.is<JsonArray>())
+  if (strcmp(pendingCmd, "reload") == 0)
   {
-    Serial.println("Expected JSON array");
-    return false;
+    Serial.println("BLE cmd: reloading stocks");
+    stockCount = 0;
+    fetchStocks(true);
   }
+  else if (strcmp(pendingCmd, "reset") == 0)
+  {
+    Serial.println("BLE cmd: resetting to defaults");
 
+    prefs.begin("tickers", false); prefs.clear(); prefs.end();
+    prefs.begin("msgs",    false); prefs.clear(); prefs.end();
+    prefs.begin("stocks",  false); prefs.clear(); prefs.end();
+
+    loadTickersFromNVS();  // re-seeds from config.h since NVS is now empty
+
+    messageCount = 0;
+    currentMsg   = 0;
+    stockCount   = 0;
+    fetchStocks(true);
+  }
+  else
+  {
+    Serial.printf("BLE cmd: unknown command \"%s\"\n", pendingCmd);
+  }
+}
+
+void applyPendingMode()
+{
+  modeUpdatePending = false;
+  if (strcmp(pendingModeStr, "stocks") == 0)
+  {
+    showStocks = true;
+    Serial.println("BLE: mode -> STOCKS");
+  }
+  else if (strcmp(pendingModeStr, "messages") == 0)
+  {
+    showStocks = false;
+    Serial.println("BLE: mode -> MESSAGES");
+  }
+  else
+  {
+    Serial.printf("BLE: unknown mode \"%s\", ignoring\n", pendingModeStr);
+  }
+}
+
+void applyPendingMessages()
+{
+  char buf[BLE_MSGS_BUF_LEN];
+  strncpy(buf, pendingMsgsStr, sizeof(buf) - 1);
+  buf[sizeof(buf) - 1] = '\0';
+  msgsUpdatePending = false;
+
+  char tmp[MAX_MESSAGES][MAX_STRING_LEN + 1];
   int count = 0;
-  for (JsonVariant v : doc.as<JsonArray>())
+
+  char *token = strtok(buf, "|");
+  while (token && count < MAX_MESSAGES)
   {
-    if (count >= MAX_MESSAGES)
-      break;
-    if (!v.is<const char *>())
-      continue;
+    while (*token == ' ') token++;
+    int len = strlen(token);
+    while (len > 0 && token[len - 1] == ' ') len--;
+    token[len] = '\0';
 
-    const char *s = v.as<const char *>();
-    if (strlen(s) == 0)
-      continue;
-
-    strncpy(messageStore[count], s, MAX_STRING_LEN);
-    messageStore[count][MAX_STRING_LEN] = '\0';
-    count++;
+    if (len > 0)
+    {
+      strncpy(tmp[count], token, MAX_STRING_LEN);
+      tmp[count][MAX_STRING_LEN] = '\0';
+      count++;
+    }
+    token = strtok(nullptr, "|");
   }
 
   if (count == 0)
-    return false;
+  {
+    Serial.println("BLE: no valid messages, ignoring");
+    return;
+  }
 
+  for (int i = 0; i < count; i++)
+    strncpy(messageStore[i], tmp[i], MAX_STRING_LEN + 1);
   messageCount = count;
   currentMsg = 0;
-  Serial.printf("Loaded %d messages\n", messageCount);
-  return true;
+  saveMessagesToNVS();
+  Serial.printf("BLE: applied %d messages\n", count);
 }
 
-void fetchMessages()
+void applyPendingTickers()
 {
-  if (WiFi.status() != WL_CONNECTED)
+  char buf[BLE_TICKER_BUF_LEN];
+  strncpy(buf, pendingTickerStr, sizeof(buf) - 1);
+  buf[sizeof(buf) - 1] = '\0';
+  tickerUpdatePending = false;
+
+  char tmp[MAX_STOCKS][MAX_TICKER_LEN];
+  int count = 0;
+
+  char *token = strtok(buf, ",");
+  while (token && count < MAX_STOCKS)
   {
-    connectWifi();
-    if (WiFi.status() != WL_CONNECTED)
-      return;
+    while (*token == ' ') token++;
+    int len = strlen(token);
+    while (len > 0 && token[len - 1] == ' ') len--;
+    token[len] = '\0';
+
+    if (len > 0 && len < MAX_TICKER_LEN)
+    {
+      strncpy(tmp[count], token, MAX_TICKER_LEN - 1);
+      tmp[count][MAX_TICKER_LEN - 1] = '\0';
+      for (int j = 0; tmp[count][j]; j++)
+        tmp[count][j] = toupper((unsigned char)tmp[count][j]);
+      count++;
+    }
+    token = strtok(nullptr, ",");
   }
 
-  HTTPClient http;
-  http.setConnectTimeout(5000);
-  http.setTimeout(5000);
-
-  Serial.printf("Fetching %s\n", MESSAGES_URL);
-  http.begin(MESSAGES_URL);
-
-  int code = http.GET();
-  if (code != 200)
+  if (count == 0)
   {
-    Serial.printf("HTTP error: %d\n", code);
-    http.end();
+    Serial.println("BLE: no valid tickers, ignoring");
     return;
   }
 
-  int len = http.getSize();
-  if (len > 0 && len > MAX_RESPONSE_BYTES)
-  {
-    Serial.printf("Response too large (%d bytes), aborting\n", len);
-    http.end();
-    return;
-  }
+  for (int i = 0; i < count; i++)
+    strncpy(nvsTickers[i], tmp[i], MAX_TICKER_LEN);
+  nvsTickerCount = count;
+  saveTickersToNVS();
 
-  String body = http.getString();
-  http.end();
-
-  if (body.length() > MAX_RESPONSE_BYTES)
-  {
-    Serial.println("Response exceeded max size, aborting parse");
-    return;
-  }
-
-  Serial.printf("Received %u bytes\n", body.length());
-
-  if (!parseMessages(body))
-  {
-    Serial.println("No valid messages, keeping previous set");
-  }
+  stockCount = 0;
+  fetchStocks(true);
 }
 
 // --- Main ---
@@ -410,12 +652,14 @@ void setup()
   delay(500);
 
   initDisplay();
+  loadMessagesFromNVS();
+  loadTickersFromNVS();
   loadStocksFromCache();
   showNext();
 
   connectWifi();
   initTime();
-  // fetchMessages();
+  initBLE();
   fetchStocks();
   showNext();
   lastFetch = millis();
@@ -423,6 +667,11 @@ void setup()
 
 void loop()
 {
+  if (cmdPending)           applyPendingCmd();
+  if (modeUpdatePending)    applyPendingMode();
+  if (msgsUpdatePending)    applyPendingMessages();
+  if (tickerUpdatePending)  applyPendingTickers();
+
   checkTouch();
 
   if (display.displayAnimate())
@@ -435,7 +684,6 @@ void loop()
   {
     lastFetch = millis();
     if (WiFi.status() != WL_CONNECTED) return;
-    fetchMessages();
     fetchStocks();
   }
 }

@@ -1,0 +1,95 @@
+#!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["bleak"]
+# ///
+"""Control LED-Ticker over BLE.
+
+Usage:
+    uv run tools/led.py tickers AAPL MSFT GOOGL
+    uv run tools/led.py messages "Take a break!" "Drink water!" "Stand up!"
+    uv run tools/led.py mode stocks
+    uv run tools/led.py mode messages
+"""
+
+import asyncio
+import sys
+from bleak import BleakScanner, BleakClient
+
+DEVICE_NAME = "LED-Ticker"
+SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+TICKER_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+MODE_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a9"
+MSGS_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26aa"
+CMD_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26ab"
+
+
+async def send(char_uuid: str, payload: str):
+    print(f"Looking for {DEVICE_NAME}...")
+    device = await BleakScanner.find_device_by_name(DEVICE_NAME, timeout=15)
+    if not device:
+        print(f"ERROR: '{DEVICE_NAME}' not found. Is it powered on and in range?")
+        sys.exit(1)
+    print(f"Found {device.address}, connecting...")
+    async with BleakClient(device) as client:
+        await client.write_gatt_char(char_uuid, payload.encode(), response=True)
+        print(f"Sent: {payload}")
+
+
+def cmd_tickers(args):
+    if not args:
+        print("Usage: led.py tickers TICKER [TICKER ...]")
+        sys.exit(1)
+    payload = ",".join(t.upper().strip() for t in args)
+    asyncio.run(send(TICKER_CHAR_UUID, payload))
+
+
+def cmd_messages(args):
+    if not args:
+        print("Usage: led.py messages MSG [MSG ...]")
+        sys.exit(1)
+    payload = "|".join(args)
+    if len(payload.encode()) >= 512:
+        print(f"ERROR: messages too long ({len(payload.encode())} bytes, max 511)")
+        sys.exit(1)
+    asyncio.run(send(MSGS_CHAR_UUID, payload))
+
+
+def cmd_mode(args):
+    if not args or args[0] not in ("stocks", "messages"):
+        print("Usage: led.py mode stocks|messages")
+        sys.exit(1)
+    asyncio.run(send(MODE_CHAR_UUID, args[0]))
+
+
+def cmd_reload(_args):
+    asyncio.run(send(CMD_CHAR_UUID, "reload"))
+
+
+def cmd_reset(_args):
+    confirm = input("Reset all NVS data to config.h defaults? [y/N] ")
+    if confirm.strip().lower() != "y":
+        print("Aborted.")
+        sys.exit(0)
+    asyncio.run(send(CMD_CHAR_UUID, "reset"))
+
+
+COMMANDS = {
+    "tickers": cmd_tickers,
+    "messages": cmd_messages,
+    "mode": cmd_mode,
+    "reload": cmd_reload,
+    "reset": cmd_reset,
+}
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
+        print("Usage: led.py <command> [args...]")
+        print()
+        print("  tickers  AAPL MSFT GOOGL        set stock symbols and reload quotes")
+        print("  messages 'msg1' 'msg2' ...       set scrolling messages (persisted)")
+        print("  mode     stocks|messages         switch display mode")
+        print("  reload                           force immediate stock refresh")
+        print("  reset                            clear NVS and revert to defaults")
+        sys.exit(1)
+    COMMANDS[sys.argv[1]](sys.argv[2:])

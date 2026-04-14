@@ -1,3 +1,5 @@
 src/secrets.h
 .pio
 .vscode/
+tools/__pycache__/
+tools/.ruff_cache/
