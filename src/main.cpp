@@ -285,7 +285,25 @@ class TickerCallbacks : public NimBLECharacteristicCallbacks
       Serial.printf("BLE tickers: \"%s\"\n", pendingTickerStr);
     }
   }
+
+  void onRead(NimBLECharacteristic *pChar) override
+  {
+    char buf[BLE_TICKER_BUF_LEN];
+    int len = 0;
+    for (int i = 0; i < nvsTickerCount && len < (int)sizeof(buf) - 1; i++)
+    {
+      if (i > 0) buf[len++] = ',';
+      int remaining = sizeof(buf) - 1 - len;
+      int tlen = strnlen(nvsTickers[i], remaining);
+      memcpy(buf + len, nvsTickers[i], tlen);
+      len += tlen;
+    }
+    buf[len] = '\0';
+    pChar->setValue((uint8_t *)buf, len);
+  }
 };
+
+extern bool showStocks;
 
 class ModeCallbacks : public NimBLECharacteristicCallbacks
 {
@@ -299,6 +317,12 @@ class ModeCallbacks : public NimBLECharacteristicCallbacks
       modeUpdatePending = true;
       Serial.printf("BLE mode: \"%s\"\n", pendingModeStr);
     }
+  }
+
+  void onRead(NimBLECharacteristic *pChar) override
+  {
+    const char *mode = showStocks ? "stocks" : "messages";
+    pChar->setValue((uint8_t *)mode, strlen(mode));
   }
 };
 
@@ -315,6 +339,26 @@ class MsgsCallbacks : public NimBLECharacteristicCallbacks
       Serial.printf("BLE messages: %d bytes\n", val.length());
     }
   }
+
+  void onRead(NimBLECharacteristic *pChar) override
+  {
+    char buf[BLE_MSGS_BUF_LEN];
+    int len = 0;
+    int count = messageCount > 0 ? messageCount : fallbackCount;
+    for (int i = 0; i < count && len < (int)sizeof(buf) - 1; i++)
+    {
+      const char *msg = messageCount > 0 ? messageStore[i] : fallbackMessages[i];
+      if (i > 0 && len < (int)sizeof(buf) - 1)
+        buf[len++] = '|';
+      int remaining = sizeof(buf) - 1 - len;
+      int msgLen = strnlen(msg, remaining);
+      memcpy(buf + len, msg, msgLen);
+      len += msgLen;
+    }
+    buf[len] = '\0';
+    pChar->setValue((uint8_t *)buf, len);
+    Serial.println("BLE messages: read");
+  }
 };
 
 class WifiCallbacks : public NimBLECharacteristicCallbacks
@@ -330,6 +374,12 @@ class WifiCallbacks : public NimBLECharacteristicCallbacks
       Serial.println("BLE wifi: credentials received");
     }
   }
+
+  void onRead(NimBLECharacteristic *pChar) override
+  {
+    // Return SSID only — never expose the password over BLE
+    pChar->setValue((uint8_t *)nvsWifiSsid, strlen(nvsWifiSsid));
+  }
 };
 
 class ApiKeyCallbacks : public NimBLECharacteristicCallbacks
@@ -344,6 +394,11 @@ class ApiKeyCallbacks : public NimBLECharacteristicCallbacks
       apiKeyUpdatePending = true;
       Serial.println("BLE apikey: key received");
     }
+  }
+
+  void onRead(NimBLECharacteristic *pChar) override
+  {
+    pChar->setValue((uint8_t *)nvsApiKey, strlen(nvsApiKey));
   }
 };
 
@@ -378,17 +433,17 @@ void initBLE()
   NimBLEServer *pServer = NimBLEDevice::createServer();
   NimBLEService *pService = pServer->createService(BLE_SERVICE_UUID);
 
-  pService->createCharacteristic(BLE_TICKER_CHAR_UUID, NIMBLE_PROPERTY::WRITE)
+  pService->createCharacteristic(BLE_TICKER_CHAR_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE)
     ->setCallbacks(new TickerCallbacks());
-  pService->createCharacteristic(BLE_MODE_CHAR_UUID, NIMBLE_PROPERTY::WRITE)
+  pService->createCharacteristic(BLE_MODE_CHAR_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE)
     ->setCallbacks(new ModeCallbacks());
-  pService->createCharacteristic(BLE_MSGS_CHAR_UUID, NIMBLE_PROPERTY::WRITE)
+  pService->createCharacteristic(BLE_MSGS_CHAR_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE)
     ->setCallbacks(new MsgsCallbacks());
   pService->createCharacteristic(BLE_CMD_CHAR_UUID, NIMBLE_PROPERTY::WRITE)
     ->setCallbacks(new CmdCallbacks());
-  pService->createCharacteristic(BLE_WIFI_CHAR_UUID, NIMBLE_PROPERTY::WRITE)
+  pService->createCharacteristic(BLE_WIFI_CHAR_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE)
     ->setCallbacks(new WifiCallbacks());
-  pService->createCharacteristic(BLE_APIKEY_CHAR_UUID, NIMBLE_PROPERTY::WRITE)
+  pService->createCharacteristic(BLE_APIKEY_CHAR_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE)
     ->setCallbacks(new ApiKeyCallbacks());
 
   pService->start();

@@ -26,6 +26,17 @@ WIFI_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26ac"
 APIKEY_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26ad"
 
 
+async def read_chars(*char_uuids: str) -> list[str]:
+    print(f"Looking for {DEVICE_NAME}...")
+    device = await BleakScanner.find_device_by_name(DEVICE_NAME, timeout=15)
+    if not device:
+        print(f"ERROR: '{DEVICE_NAME}' not found. Is it powered on and in range?")
+        sys.exit(1)
+    print(f"Found {device.address}, connecting...")
+    async with BleakClient(device) as client:
+        return [(await client.read_gatt_char(uuid)).decode() for uuid in char_uuids]
+
+
 async def send(char_uuid: str, payload: str):
     print(f"Looking for {DEVICE_NAME}...")
     device = await BleakScanner.find_device_by_name(DEVICE_NAME, timeout=15)
@@ -83,6 +94,30 @@ def cmd_wifi(args):
     asyncio.run(send(WIFI_CHAR_UUID, f"{ssid}|{password}"))
 
 
+GET_READABLE = {
+    "wifi": (WIFI_CHAR_UUID, lambda v: v or "(not set)"),
+    "apikey": (APIKEY_CHAR_UUID, lambda v: v or "(not set)"),
+    "tickers": (TICKER_CHAR_UUID, lambda v: v or "(none)"),
+    "messages": (
+        MSGS_CHAR_UUID,
+        lambda v: "\n".join(
+            f"  {i + 1}. {m}" for i, m in enumerate(v.split("|") if v else [])
+        ),
+    ),
+    "mode": (MODE_CHAR_UUID, lambda v: v or "(unknown)"),
+}
+
+
+def cmd_get(args):
+    if not args or args[0] not in GET_READABLE:
+        print(f"Usage: led.py get {'|'.join(GET_READABLE)}")
+        sys.exit(1)
+    key = args[0]
+    uuid, fmt = GET_READABLE[key]
+    (raw,) = asyncio.run(read_chars(uuid))
+    print(fmt(raw))
+
+
 def cmd_reload(_args):
     asyncio.run(send(CMD_CHAR_UUID, "reload"))
 
@@ -101,6 +136,7 @@ COMMANDS = {
     "mode": cmd_mode,
     "apikey": cmd_apikey,
     "wifi": cmd_wifi,
+    "get": cmd_get,
     "reload": cmd_reload,
     "reset": cmd_reset,
 }
@@ -113,7 +149,10 @@ if __name__ == "__main__":
         print("  messages 'msg1' 'msg2' ...       set scrolling messages (persisted)")
         print("  mode     stocks|messages         switch display mode")
         print("  apikey   KEY                      set Finnhub API key")
-        print("  wifi     SSID PASSWORD            update WiFi credentials and reconnect")
+        print(
+            "  wifi     SSID PASSWORD            update WiFi credentials and reconnect"
+        )
+        print("  get      wifi|apikey|tickers|messages|mode  read a setting")
         print("  reload                           force immediate stock refresh")
         print("  reset                            clear NVS and revert to defaults")
         sys.exit(1)
