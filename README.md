@@ -6,10 +6,12 @@ Scrolling message board and stock ticker using a Freenove ESP32-S3 and a DIYable
 
 - Scrolling text display on a 32x8 LED matrix
 - Live stock quotes from Finnhub API
-- Bluetooth (BLE) control — update stock symbols, messages, and display mode wirelessly
+- No secrets at build time — WiFi credentials and API key configured via BLE and stored in NVS
+- Bluetooth (BLE) control — update WiFi, API key, stock symbols, messages, and display mode wirelessly
 - Touch-to-toggle between stocks and messages (capacitive touch on GPIO 14)
 - All settings persist across reboots (NVS flash storage)
-- Hardcoded fallback messages until you send your own via BLE
+- Fallback messages shown until you set your own via BLE
+- Prompts on display if WiFi or API key not yet configured
 - Market-hours aware — skips API calls when NYSE is closed
 - Auto-refreshes every 5 minutes
 
@@ -36,35 +38,30 @@ Touch input: GPIO 14 (touch the bare pin to toggle modes)
 
 1. Install [PlatformIO](https://platformio.org/)
 
-2. Copy the secrets template and fill in your credentials:
-   ```
-   cp src/secrets.h.example src/secrets.h
-   ```
-
-3. Edit `src/secrets.h` with your credentials:
-   ```c
-   #define WIFI_SSID "your-ssid"
-   #define WIFI_PASS "your-password"
-   #define FINNHUB_API_KEY "your-finnhub-key"
-   ```
-
-   Get a free Finnhub API key at https://finnhub.io/register
-
-4. Optionally edit `src/config.h` to set default stock symbols and fallback messages:
+2. Optionally edit `src/config.h` to set default stock symbols and fallback messages:
    ```c
    const char *stockTickers[] = {"AAPL", "GOOGL", "MSFT", "AMZN"};
    ```
-   These are only used on first boot to seed NVS. After that, use the BLE tool.
+   These seed NVS on first boot. After that, use the BLE tool to change them.
 
-5. Build and upload:
+3. Build and upload:
    ```
    pio run -t upload
    ```
 
-6. Monitor serial output:
+4. Monitor serial output:
    ```
    pio device monitor
    ```
+
+5. On first boot the display will prompt you to configure WiFi and the API key via BLE:
+   ```
+   uv run tools/led.py wifi My Network Name password123
+   uv run tools/led.py apikey your-finnhub-key
+   ```
+   The last argument is always the password — everything before it is the SSID, so spaces in network names work naturally.
+
+   Get a free Finnhub API key at https://finnhub.io/register
 
 ## BLE Control
 
@@ -83,10 +80,17 @@ uv run tools/led.py messages "Take a break!" "Drink water!" "Stand up!"
 uv run tools/led.py mode stocks
 uv run tools/led.py mode messages
 
+# Update WiFi credentials and reconnect (SSID may contain spaces)
+uv run tools/led.py wifi My Network Name password123
+
+# Set Finnhub API key
+uv run tools/led.py apikey your-finnhub-key
+
 # Force an immediate stock quote refresh
 uv run tools/led.py reload
 
 # Clear all NVS data and revert to config.h defaults
+# Note: this also clears WiFi and API key — you will need to reconfigure them
 uv run tools/led.py reset
 ```
 
@@ -103,12 +107,16 @@ For building a custom app (e.g. iOS with CoreBluetooth):
 | Mode (write) | `beb5483e-36e1-4688-b7f5-ea07361b26a9` |
 | Messages (write) | `beb5483e-36e1-4688-b7f5-ea07361b26aa` |
 | Command (write) | `beb5483e-36e1-4688-b7f5-ea07361b26ab` |
+| WiFi (write) | `beb5483e-36e1-4688-b7f5-ea07361b26ac` |
+| API Key (write) | `beb5483e-36e1-4688-b7f5-ea07361b26ad` |
 
 Payload formats:
 - **Tickers:** comma-separated symbols — `AAPL,MSFT,GOOGL`
 - **Mode:** `stocks` or `messages`
 - **Messages:** pipe-separated strings — `Take a break!|Drink water!|Stand up!` (max 511 bytes)
 - **Command:** `reload` (force stock refresh) or `reset` (clear NVS, revert to `config.h` defaults)
+- **WiFi:** `SSID|password` — updates credentials, saves to NVS, reconnects immediately
+- **API Key:** plain string — Finnhub API key, saved to NVS, triggers immediate stock fetch
 
 ## Configuration
 

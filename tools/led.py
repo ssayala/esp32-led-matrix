@@ -22,6 +22,8 @@ TICKER_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 MODE_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a9"
 MSGS_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26aa"
 CMD_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26ab"
+WIFI_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26ac"
+APIKEY_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26ad"
 
 
 async def send(char_uuid: str, payload: str):
@@ -62,6 +64,25 @@ def cmd_mode(args):
     asyncio.run(send(MODE_CHAR_UUID, args[0]))
 
 
+def cmd_apikey(args):
+    if not args:
+        print("Usage: led.py apikey KEY")
+        sys.exit(1)
+    asyncio.run(send(APIKEY_CHAR_UUID, args[0]))
+
+
+def cmd_wifi(args):
+    if len(args) < 2:
+        print("Usage: led.py wifi SSID PASSWORD")
+        sys.exit(1)
+    ssid = " ".join(args[:-1])
+    password = args[-1]
+    if "|" in ssid:
+        print("ERROR: SSID cannot contain '|'")
+        sys.exit(1)
+    asyncio.run(send(WIFI_CHAR_UUID, f"{ssid}|{password}"))
+
+
 def cmd_reload(_args):
     asyncio.run(send(CMD_CHAR_UUID, "reload"))
 
@@ -78,6 +99,8 @@ COMMANDS = {
     "tickers": cmd_tickers,
     "messages": cmd_messages,
     "mode": cmd_mode,
+    "apikey": cmd_apikey,
+    "wifi": cmd_wifi,
     "reload": cmd_reload,
     "reset": cmd_reset,
 }
@@ -89,6 +112,8 @@ if __name__ == "__main__":
         print("  tickers  AAPL MSFT GOOGL        set stock symbols and reload quotes")
         print("  messages 'msg1' 'msg2' ...       set scrolling messages (persisted)")
         print("  mode     stocks|messages         switch display mode")
+        print("  apikey   KEY                      set Finnhub API key")
+        print("  wifi     SSID PASSWORD            update WiFi credentials and reconnect")
         print("  reload                           force immediate stock refresh")
         print("  reset                            clear NVS and revert to defaults")
         sys.exit(1)

@@ -8,11 +8,6 @@
 #include <Preferences.h>
 #include <time.h>
 #include <NimBLEDevice.h>
-#if __has_include("secrets.h")
-#include "secrets.h"
-#else
-#error "Copy src/secrets.h.example to src/secrets.h and fill in your credentials"
-#endif
 #include "config.h"
 
 // --- Hardware & Display Config ---
@@ -25,6 +20,79 @@
 #define TOUCH_PIN       14
 #define TOUCH_THRESHOLD 30000
 #define SCROLL_SPEED    50
+
+Preferences prefs;
+
+// --- WiFi Credentials ---
+
+#define WIFI_SSID_MAX 64
+#define WIFI_PASS_MAX 64
+
+char nvsWifiSsid[WIFI_SSID_MAX];
+char nvsWifiPass[WIFI_PASS_MAX];
+
+void saveWifiToNVS()
+{
+  prefs.begin("wifi", false);
+  prefs.putString("ssid", nvsWifiSsid);
+  prefs.putString("pass", nvsWifiPass);
+  prefs.end();
+  Serial.printf("WiFi credentials saved to NVS (SSID: %s)\n", nvsWifiSsid);
+}
+
+void loadWifiFromNVS()
+{
+  prefs.begin("wifi", true);
+  bool hasSsid = prefs.isKey("ssid");
+  if (hasSsid)
+  {
+    prefs.getString("ssid", nvsWifiSsid, WIFI_SSID_MAX);
+    prefs.getString("pass", nvsWifiPass, WIFI_PASS_MAX);
+    Serial.printf("Loaded WiFi credentials from NVS (SSID: %s)\n", nvsWifiSsid);
+  }
+  else
+  {
+    nvsWifiSsid[0] = '\0';
+    nvsWifiPass[0] = '\0';
+    Serial.println("WiFi not configured — use BLE to set credentials");
+  }
+  prefs.end();
+}
+
+bool wifiConfigured() { return nvsWifiSsid[0] != '\0'; }
+
+// --- Finnhub API Key ---
+
+#define MAX_APIKEY_LEN 64
+
+char nvsApiKey[MAX_APIKEY_LEN];
+
+void saveApiKeyToNVS()
+{
+  prefs.begin("apikey", false);
+  prefs.putString("key", nvsApiKey);
+  prefs.end();
+  Serial.println("API key saved to NVS");
+}
+
+void loadApiKeyFromNVS()
+{
+  prefs.begin("apikey", true);
+  bool hasKey = prefs.isKey("key");
+  if (hasKey)
+  {
+    prefs.getString("key", nvsApiKey, MAX_APIKEY_LEN);
+    Serial.println("Loaded API key from NVS");
+  }
+  else
+  {
+    nvsApiKey[0] = '\0';
+    Serial.println("Finnhub API key not configured — use BLE to set it");
+  }
+  prefs.end();
+}
+
+bool apiKeyConfigured() { return nvsApiKey[0] != '\0'; }
 
 // --- Fetch Limits ---
 
@@ -51,8 +119,6 @@ void scrollText(const char *msg)
   display.displayScroll(msg, PA_LEFT, PA_SCROLL_LEFT, SCROLL_SPEED);
 }
 
-Preferences prefs;
-
 // --- Messages ---
 
 char messageStore[MAX_MESSAGES][MAX_STRING_LEN + 1];
@@ -66,6 +132,10 @@ int getTotalMessages()
 
 const char *getMessage(int idx)
 {
+  if (!wifiConfigured())
+    return "Set WiFi via BLE: led.py wifi SSID PASS";
+  if (!apiKeyConfigured())
+    return "Set Finnhub key via BLE: led.py apikey KEY";
   if (messageCount > 0)
     return messageStore[idx % messageCount];
   return fallbackMessages[idx % fallbackCount];
@@ -172,18 +242,25 @@ void loadTickersFromNVS()
 #define BLE_MODE_CHAR_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26a9"
 #define BLE_MSGS_CHAR_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26aa"
 #define BLE_CMD_CHAR_UUID     "beb5483e-36e1-4688-b7f5-ea07361b26ab"
+#define BLE_WIFI_CHAR_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26ac"
+#define BLE_APIKEY_CHAR_UUID  "beb5483e-36e1-4688-b7f5-ea07361b26ad"
 #define BLE_TICKER_BUF_LEN    (MAX_STOCKS * (MAX_TICKER_LEN + 1))
 #define BLE_MSGS_BUF_LEN      512
+#define BLE_WIFI_BUF_LEN      (WIFI_SSID_MAX + WIFI_PASS_MAX + 1)
 
 volatile bool tickerUpdatePending = false;
 volatile bool modeUpdatePending   = false;
 volatile bool msgsUpdatePending   = false;
 volatile bool cmdPending          = false;
+volatile bool wifiUpdatePending   = false;
+volatile bool apiKeyUpdatePending = false;
 
 char pendingTickerStr[BLE_TICKER_BUF_LEN];
 char pendingModeStr[16];
 char pendingMsgsStr[BLE_MSGS_BUF_LEN];
 char pendingCmd[16];
+char pendingWifiStr[BLE_WIFI_BUF_LEN];
+char pendingApiKey[MAX_APIKEY_LEN];
 
 // Minimum ms between writes that trigger network activity
 #define BLE_FETCH_COOLDOWN_MS 10000
@@ -240,6 +317,36 @@ class MsgsCallbacks : public NimBLECharacteristicCallbacks
   }
 };
 
+class WifiCallbacks : public NimBLECharacteristicCallbacks
+{
+  void onWrite(NimBLECharacteristic *pChar) override
+  {
+    std::string val = pChar->getValue();
+    if (val.length() > 0 && val.length() < BLE_WIFI_BUF_LEN)
+    {
+      memcpy(pendingWifiStr, val.c_str(), val.length());
+      pendingWifiStr[val.length()] = '\0';
+      wifiUpdatePending = true;
+      Serial.println("BLE wifi: credentials received");
+    }
+  }
+};
+
+class ApiKeyCallbacks : public NimBLECharacteristicCallbacks
+{
+  void onWrite(NimBLECharacteristic *pChar) override
+  {
+    std::string val = pChar->getValue();
+    if (val.length() > 0 && val.length() < MAX_APIKEY_LEN)
+    {
+      memcpy(pendingApiKey, val.c_str(), val.length());
+      pendingApiKey[val.length()] = '\0';
+      apiKeyUpdatePending = true;
+      Serial.println("BLE apikey: key received");
+    }
+  }
+};
+
 class CmdCallbacks : public NimBLECharacteristicCallbacks
 {
   void onWrite(NimBLECharacteristic *pChar) override
@@ -279,6 +386,10 @@ void initBLE()
     ->setCallbacks(new MsgsCallbacks());
   pService->createCharacteristic(BLE_CMD_CHAR_UUID, NIMBLE_PROPERTY::WRITE)
     ->setCallbacks(new CmdCallbacks());
+  pService->createCharacteristic(BLE_WIFI_CHAR_UUID, NIMBLE_PROPERTY::WRITE)
+    ->setCallbacks(new WifiCallbacks());
+  pService->createCharacteristic(BLE_APIKEY_CHAR_UUID, NIMBLE_PROPERTY::WRITE)
+    ->setCallbacks(new ApiKeyCallbacks());
 
   pService->start();
   NimBLEAdvertising *pAdv = NimBLEDevice::getAdvertising();
@@ -369,7 +480,7 @@ bool isMarketOpen()
 
 void fetchStocks(bool force = false)
 {
-  if (WiFi.status() != WL_CONNECTED)
+  if (!apiKeyConfigured() || WiFi.status() != WL_CONNECTED)
     return;
 
   if (!force && !isMarketOpen())
@@ -390,7 +501,7 @@ void fetchStocks(bool force = false)
     char url[256];
     snprintf(url, sizeof(url),
              "https://finnhub.io/api/v1/quote?symbol=%s&token=%s",
-             nvsTickers[i], FINNHUB_API_KEY);
+             nvsTickers[i], nvsApiKey);
 
     Serial.printf("Fetching stock: %s\n", nvsTickers[i]);
     http.begin(url);
@@ -472,7 +583,7 @@ void showNextStock()
 
 void showNext()
 {
-  if (showStocks && stockCount > 0)
+  if (wifiConfigured() && apiKeyConfigured() && showStocks && stockCount > 0)
     showNextStock();
   else
     showNextMsg();
@@ -482,11 +593,11 @@ void showNext()
 
 void connectWifi()
 {
-  if (WiFi.status() == WL_CONNECTED)
+  if (!wifiConfigured() || WiFi.status() == WL_CONNECTED)
     return;
 
-  Serial.printf("Connecting to %s", WIFI_SSID);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.printf("Connecting to %s", nvsWifiSsid);
+  WiFi.begin(nvsWifiSsid, nvsWifiPass);
 
   for (int attempts = 0; WiFi.status() != WL_CONNECTED && attempts < 20; attempts++)
   {
@@ -507,6 +618,50 @@ void connectWifi()
 
 // --- BLE Apply ---
 
+void applyPendingApiKey()
+{
+  apiKeyUpdatePending = false;
+  strncpy(nvsApiKey, pendingApiKey, MAX_APIKEY_LEN - 1);
+  nvsApiKey[MAX_APIKEY_LEN - 1] = '\0';
+  saveApiKeyToNVS();
+  Serial.println("BLE apikey: saved, fetching stocks");
+  stockCount = 0;
+  fetchStocks(true);
+}
+
+void applyPendingWifi()
+{
+  wifiUpdatePending = false;
+
+  // Split on first '|' — password may contain '|'
+  char *sep = strchr(pendingWifiStr, '|');
+  if (!sep)
+  {
+    Serial.println("BLE wifi: missing '|' separator, ignoring");
+    return;
+  }
+
+  *sep = '\0';
+  const char *ssid = pendingWifiStr;
+  const char *pass = sep + 1;
+
+  if (strlen(ssid) == 0 || strlen(ssid) >= WIFI_SSID_MAX)
+  {
+    Serial.println("BLE wifi: invalid SSID, ignoring");
+    return;
+  }
+
+  strncpy(nvsWifiSsid, ssid, WIFI_SSID_MAX - 1);
+  nvsWifiSsid[WIFI_SSID_MAX - 1] = '\0';
+  strncpy(nvsWifiPass, pass, WIFI_PASS_MAX - 1);
+  nvsWifiPass[WIFI_PASS_MAX - 1] = '\0';
+  saveWifiToNVS();
+
+  Serial.printf("BLE wifi: reconnecting to \"%s\"\n", nvsWifiSsid);
+  WiFi.disconnect();
+  connectWifi();
+}
+
 void applyPendingCmd()
 {
   cmdPending = false;
@@ -521,6 +676,8 @@ void applyPendingCmd()
   {
     Serial.println("BLE cmd: resetting to defaults");
 
+    prefs.begin("wifi",    false); prefs.clear(); prefs.end();
+    prefs.begin("apikey",  false); prefs.clear(); prefs.end();
     prefs.begin("tickers", false); prefs.clear(); prefs.end();
     prefs.begin("msgs",    false); prefs.clear(); prefs.end();
     prefs.begin("stocks",  false); prefs.clear(); prefs.end();
@@ -652,6 +809,8 @@ void setup()
   delay(500);
 
   initDisplay();
+  loadWifiFromNVS();
+  loadApiKeyFromNVS();
   loadMessagesFromNVS();
   loadTickersFromNVS();
   loadStocksFromCache();
@@ -667,6 +826,8 @@ void setup()
 
 void loop()
 {
+  if (wifiUpdatePending)    applyPendingWifi();
+  if (apiKeyUpdatePending)  applyPendingApiKey();
   if (cmdPending)           applyPendingCmd();
   if (modeUpdatePending)    applyPendingMode();
   if (msgsUpdatePending)    applyPendingMessages();
