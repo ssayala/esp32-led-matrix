@@ -21,7 +21,8 @@
 #define TOUCH_THRESHOLD 30000
 #define SCROLL_SPEED    50
 
-Preferences prefs;
+Preferences prefs;       // used on Core 1 only (setup + BLE apply handlers)
+Preferences stockPrefs;  // used on Core 0 only (fetch task: save/load stock cache)
 
 // --- WiFi Credentials ---
 
@@ -189,6 +190,14 @@ char stockDisplay[MAX_STOCKS][MAX_STRING_LEN + 1];
 int stockCount = 0;
 int currentStock = 0;
 
+// Fetch task — runs on Core 0 alongside the WiFi/BLE stack
+#define FETCH_TASK_STACK 8192  // covers tmp[MAX_STOCKS][MAX_STRING_LEN+1] + HTTP buffers
+static SemaphoreHandle_t stockMutex     = nullptr;
+static TaskHandle_t      fetchTaskHandle = nullptr;
+// MD_Parola stores the pointer passed to displayScroll, not a copy.
+// This buffer persists for the duration of each scroll.
+static char stockScrollBuf[MAX_STRING_LEN + 1];
+
 void saveTickersToNVS()
 {
   prefs.begin("tickers", false);
@@ -222,7 +231,7 @@ void loadTickersFromNVS()
   else
   {
     prefs.end();
-    // First boot: seed from secrets.h defaults
+    // First boot: seed from config.h defaults
     for (int i = 0; i < stockTickerCount && i < MAX_STOCKS; i++)
     {
       strncpy(nvsTickers[i], stockTickers[i], MAX_TICKER_LEN - 1);
@@ -453,41 +462,51 @@ void initBLE()
   Serial.println("BLE advertising as " BLE_DEVICE_NAME);
 }
 
+static void commitStocks(const char tmp[][MAX_STRING_LEN + 1], int count)
+{
+  xSemaphoreTake(stockMutex, portMAX_DELAY);
+  for (int i = 0; i < count; i++)
+    memcpy(stockDisplay[i], tmp[i], MAX_STRING_LEN + 1);
+  stockCount   = count;
+  currentStock = 0;
+  xSemaphoreGive(stockMutex);
+}
+
 void saveStocksToCache()
 {
-  prefs.begin("stocks", false);
-  prefs.putInt("count", stockCount);
+  stockPrefs.begin("stocks", false);
+  stockPrefs.putInt("count", stockCount);
   for (int i = 0; i < stockCount; i++)
   {
     char key[8];
     snprintf(key, sizeof(key), "s%d", i);
-    prefs.putString(key, stockDisplay[i]);
+    stockPrefs.putString(key, stockDisplay[i]);
   }
-  prefs.end();
+  stockPrefs.end();
   Serial.println("Stocks cached to NVS");
 }
 
 void loadStocksFromCache()
 {
-  prefs.begin("stocks", true);
-  int count = prefs.getInt("count", 0);
+  stockPrefs.begin("stocks", true);
+  int count = stockPrefs.getInt("count", 0);
   if (count <= 0 || count > MAX_STOCKS)
   {
-    prefs.end();
+    stockPrefs.end();
     return;
   }
 
+  char tmp[MAX_STOCKS][MAX_STRING_LEN + 1];
   for (int i = 0; i < count; i++)
   {
     char key[8];
     snprintf(key, sizeof(key), "s%d", i);
-    prefs.getString(key, stockDisplay[i], MAX_STRING_LEN);
+    stockPrefs.getString(key, tmp[i], MAX_STRING_LEN);
   }
-  prefs.end();
+  stockPrefs.end();
 
-  stockCount = count;
-  currentStock = 0;
-  Serial.printf("Loaded %d stocks from cache\n", stockCount);
+  commitStocks(tmp, count);
+  Serial.printf("Loaded %d stocks from cache\n", count);
 }
 
 // --- Time / Market Hours ---
@@ -533,7 +552,7 @@ bool isMarketOpen()
   return minutes >= MARKET_OPEN && minutes < MARKET_CLOSE;
 }
 
-void fetchStocks(bool force = false)
+static void fetchStocksImpl(bool force)
 {
   if (!apiKeyConfigured() || WiFi.status() != WL_CONNECTED)
     return;
@@ -546,6 +565,8 @@ void fetchStocks(bool force = false)
       return;
   }
 
+  // Build results into a local buffer — no lock needed during HTTP
+  char tmp[MAX_STOCKS][MAX_STRING_LEN + 1];
   int count = 0;
   HTTPClient http;
   http.setConnectTimeout(5000);
@@ -580,26 +601,38 @@ void fetchStocks(bool force = false)
       continue;
 
     float current = doc["c"];
-    float change = doc["dp"];
+    float change  = doc["dp"];
 
     if (current == 0)
       continue;
 
-    const char* sign = change >= 0 ? "(+)" : "(-)";
-    snprintf(stockDisplay[count], MAX_STRING_LEN,
-             "%s $%.2f %s", nvsTickers[i], current, sign);
-
-    Serial.printf("Stock: %s\n", stockDisplay[count]);
+    const char *sign = change >= 0 ? "(+)" : "(-)";
+    snprintf(tmp[count], MAX_STRING_LEN, "%s $%.2f %s", nvsTickers[i], current, sign);
+    Serial.printf("Stock: %s\n", tmp[count]);
     count++;
   }
 
   if (count > 0)
   {
-    stockCount = count;
-    currentStock = 0;
-    Serial.printf("Loaded %d stock quotes\n", stockCount);
+    commitStocks(tmp, count);
+    Serial.printf("Loaded %d stock quotes\n", count);
     saveStocksToCache();
   }
+}
+
+static void fetchTask(void *)
+{
+  while (true)
+  {
+    uint32_t forceVal;
+    xTaskNotifyWait(0, 0, &forceVal, portMAX_DELAY);
+    fetchStocksImpl((bool)forceVal);
+  }
+}
+
+void triggerFetch(bool force = false)
+{
+  xTaskNotify(fetchTaskHandle, (uint32_t)force, eSetValueWithOverwrite);
 }
 
 // --- Touch Button ---
@@ -632,8 +665,12 @@ void showNextMsg()
 
 void showNextStock()
 {
-  scrollText(stockDisplay[currentStock]);
+  xSemaphoreTake(stockMutex, portMAX_DELAY);
+  strncpy(stockScrollBuf, stockDisplay[currentStock], MAX_STRING_LEN);
+  stockScrollBuf[MAX_STRING_LEN] = '\0';
   currentStock = (currentStock + 1) % stockCount;
+  xSemaphoreGive(stockMutex);
+  scrollText(stockScrollBuf);
 }
 
 void showNext()
@@ -680,8 +717,7 @@ void applyPendingApiKey()
   nvsApiKey[MAX_APIKEY_LEN - 1] = '\0';
   saveApiKeyToNVS();
   Serial.println("BLE apikey: saved, fetching stocks");
-  stockCount = 0;
-  fetchStocks(true);
+  triggerFetch(true);
 }
 
 void applyPendingWifi()
@@ -724,8 +760,7 @@ void applyPendingCmd()
   if (strcmp(pendingCmd, "reload") == 0)
   {
     Serial.println("BLE cmd: reloading stocks");
-    stockCount = 0;
-    fetchStocks(true);
+    triggerFetch(true);
   }
   else if (strcmp(pendingCmd, "reset") == 0)
   {
@@ -742,7 +777,7 @@ void applyPendingCmd()
     messageCount = 0;
     currentMsg   = 0;
     stockCount   = 0;
-    fetchStocks(true);
+    triggerFetch(true);
   }
   else
   {
@@ -850,8 +885,7 @@ void applyPendingTickers()
   nvsTickerCount = count;
   saveTickersToNVS();
 
-  stockCount = 0;
-  fetchStocks(true);
+  triggerFetch(true);
 }
 
 // --- Main ---
@@ -862,6 +896,9 @@ void setup()
 {
   Serial.begin(115200);
   delay(500);
+
+  stockMutex = xSemaphoreCreateMutex();
+  xTaskCreatePinnedToCore(fetchTask, "fetchStocks", FETCH_TASK_STACK, nullptr, 1, &fetchTaskHandle, 0);
 
   initDisplay();
   loadWifiFromNVS();
@@ -874,8 +911,7 @@ void setup()
   connectWifi();
   initTime();
   initBLE();
-  fetchStocks();
-  showNext();
+  triggerFetch();
   lastFetch = millis();
 }
 
@@ -899,7 +935,6 @@ void loop()
   if (millis() - lastFetch > FETCH_INTERVAL_MS)
   {
     lastFetch = millis();
-    if (WiFi.status() != WL_CONNECTED) return;
-    fetchStocks();
+    triggerFetch();
   }
 }
