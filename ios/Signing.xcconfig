@@ -1,0 +1,17 @@
+// LED Ticker signing configuration.
+//
+// Simulator builds work with this file as-is (no team required).
+//
+// For device builds, create a sibling file `Signing.local.xcconfig`
+// containing your Apple Developer Team ID:
+//
+//     DEVELOPMENT_TEAM = YOURTEAMID
+//
+// Then re-run `xcodegen generate`. Signing.local.xcconfig is gitignored
+// so your team ID never ends up in the public repo.
+
+CODE_SIGN_STYLE = Automatic
+CODE_SIGN_IDENTITY = Apple Development
+PROVISIONING_PROFILE_SPECIFIER =
+
+#include? "Signing.local.xcconfig"

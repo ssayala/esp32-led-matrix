@@ -1,0 +1,61 @@
+name: LEDTicker
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+targets:
+  LEDTicker:
+    type: application
+    platform: iOS
+    sources:
+      - path: LEDTicker
+    # Signing lives in Signing.xcconfig (+ gitignored Signing.local.xcconfig
+    # for personal team overrides). Do not put signing keys in this file —
+    # it's in version control.
+    configFiles:
+      Debug: Signing.xcconfig
+      Release: Signing.xcconfig
+    info:
+      path: LEDTicker/Info.plist
+      properties:
+        NSBluetoothAlwaysUsageDescription: "LED Ticker uses Bluetooth to configure your ESP32 LED matrix."
+        UILaunchScreen:
+          UIColorName: ""
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.LEDTicker
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.0"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        GENERATE_INFOPLIST_FILE: NO
+        # Don't let this app appear on Apple Vision Pro via the
+        # "Designed for iPad" compatibility path.
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
+
+  LEDTickerTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: LEDTickerTests
+    dependencies:
+      - target: LEDTicker
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGN_IDENTITY: ""
