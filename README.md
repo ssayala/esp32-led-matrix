@@ -8,6 +8,7 @@ Scrolling message board and stock ticker using a Freenove ESP32-S3 and a DIYable
 - Live stock quotes from Finnhub API
 - No secrets at build time — WiFi credentials and API key configured via BLE and stored in NVS
 - Bluetooth (BLE) control — update WiFi, API key, stock symbols, messages, and display mode wirelessly
+- Companion [iOS app](ios/README.md) (SwiftUI + CoreBluetooth) mirrors the Python CLI
 - Touch-to-toggle between stocks and messages (capacitive touch on GPIO 14)
 - All settings persist across reboots (NVS flash storage)
 - Fallback messages shown until you set your own via BLE
@@ -100,15 +101,15 @@ The physical touch pin on GPIO 14 also toggles between stocks and messages.
 
 For building a custom app (e.g. iOS with CoreBluetooth):
 
-| | UUID |
-|---|---|
-| Service | `4fafc201-1fb5-459e-8fcc-c5c9c331914b` |
-| Tickers (write) | `beb5483e-36e1-4688-b7f5-ea07361b26a8` |
-| Mode (write) | `beb5483e-36e1-4688-b7f5-ea07361b26a9` |
-| Messages (write) | `beb5483e-36e1-4688-b7f5-ea07361b26aa` |
-| Command (write) | `beb5483e-36e1-4688-b7f5-ea07361b26ab` |
-| WiFi (write) | `beb5483e-36e1-4688-b7f5-ea07361b26ac` |
-| API Key (write) | `beb5483e-36e1-4688-b7f5-ea07361b26ad` |
+| | UUID | Access |
+|---|---|---|
+| Service | `4fafc201-1fb5-459e-8fcc-c5c9c331914b` | — |
+| Tickers | `beb5483e-36e1-4688-b7f5-ea07361b26a8` | read/write |
+| Mode | `beb5483e-36e1-4688-b7f5-ea07361b26a9` | read/write |
+| Messages | `beb5483e-36e1-4688-b7f5-ea07361b26aa` | read/write |
+| Command | `beb5483e-36e1-4688-b7f5-ea07361b26ab` | write |
+| WiFi | `beb5483e-36e1-4688-b7f5-ea07361b26ac` | read/write (read returns SSID only) |
+| API Key | `beb5483e-36e1-4688-b7f5-ea07361b26ad` | read/write |
 
 Payload formats:
 - **Tickers:** comma-separated symbols — `AAPL,MSFT,GOOGL`
@@ -117,6 +118,16 @@ Payload formats:
 - **Command:** `reload` (force stock refresh) or `reset` (clear NVS, revert to `config.h` defaults)
 - **WiFi:** `SSID|password` — updates credentials, saves to NVS, reconnects immediately
 - **API Key:** plain string — Finnhub API key, saved to NVS, triggers immediate stock fetch
+
+## iOS App
+
+A SwiftUI + CoreBluetooth companion app lives in [`ios/`](ios/README.md).
+It exposes the same controls as `tools/led.py` — WiFi, API key, tickers,
+messages, display mode, reload, and reset — and reads current settings
+back from the device on connect so the UI reflects actual state.
+
+See [`ios/README.md`](ios/README.md) for build instructions, XcodeGen
+setup, and signing configuration.
 
 ## Configuration
 
