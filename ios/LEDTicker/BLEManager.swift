@@ -37,6 +37,7 @@ final class BLEManager: NSObject, ObservableObject {
     private static let peripheralIdKey = "LEDTicker.peripheral.id"
 
     @Published private(set) var state: ConnectionState = .idle
+    @Published private(set) var peripheralName: String?
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
@@ -87,6 +88,7 @@ final class BLEManager: NSObject, ObservableObject {
             central.cancelPeripheralConnection(p)
         }
         peripheral = nil
+        peripheralName = nil
         characteristics.removeAll()
         writeQueue.removeAll()
         writing = false
@@ -210,6 +212,7 @@ extension BLEManager: CBCentralManagerDelegate {
 
     func centralManager(_ c: CBCentralManager, didConnect p: CBPeripheral) {
         UserDefaults.standard.set(p.identifier.uuidString, forKey: Self.peripheralIdKey)
+        peripheralName = p.name
         state = .discovering
         p.discoverServices([Self.serviceUUID])
     }
@@ -223,6 +226,7 @@ extension BLEManager: CBCentralManagerDelegate {
                         error: Error?) {
         characteristics.removeAll()
         peripheral = nil
+        peripheralName = nil
         writeQueue.removeAll()
         writing = false
         readQueue.removeAll()

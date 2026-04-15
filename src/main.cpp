@@ -572,7 +572,17 @@ class CmdCallbacks : public NimBLECharacteristicCallbacks
 
 void initBLE()
 {
-  NimBLEDevice::init(BLE_DEVICE_NAME);
+  // Append the low 2 bytes of the chip MAC so multiple units on the
+  // same bench (or in the same household) are distinguishable during
+  // first-time setup. The iOS app scans by service UUID so it doesn't
+  // care about the name, but humans do.
+  uint64_t mac = ESP.getEfuseMac();
+  char name[sizeof(BLE_DEVICE_NAME) + 6];
+  snprintf(name, sizeof(name), "%s-%02X%02X",
+           BLE_DEVICE_NAME,
+           (uint8_t)((mac >> 8) & 0xFF),
+           (uint8_t)(mac & 0xFF));
+  NimBLEDevice::init(name);
   NimBLEDevice::setMTU(512);
   NimBLEServer *pServer = NimBLEDevice::createServer();
   NimBLEService *pService = pServer->createService(BLE_SERVICE_UUID);

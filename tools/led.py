@@ -17,7 +17,10 @@ import asyncio
 import sys
 from bleak import BleakScanner, BleakClient
 
-DEVICE_NAME = "LED-Ticker"
+# The firmware appends "-XXXX" (low 2 bytes of the chip MAC) to the base
+# name so multiple units are distinguishable, so match by prefix rather
+# than equality.
+DEVICE_NAME_PREFIX = "LED-Ticker"
 SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 TICKER_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 MODE_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a9"
@@ -28,24 +31,27 @@ APIKEY_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26ad"
 LOCS_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26ae"
 
 
-async def read_chars(*char_uuids: str) -> list[str]:
-    print(f"Looking for {DEVICE_NAME}...")
-    device = await BleakScanner.find_device_by_name(DEVICE_NAME, timeout=15)
+async def find_device():
+    print(f"Looking for {DEVICE_NAME_PREFIX}-*...")
+    device = await BleakScanner.find_device_by_filter(
+        lambda d, _ad: bool(d.name and d.name.startswith(DEVICE_NAME_PREFIX)),
+        timeout=15,
+    )
     if not device:
-        print(f"ERROR: '{DEVICE_NAME}' not found. Is it powered on and in range?")
+        print(f"ERROR: no '{DEVICE_NAME_PREFIX}-*' device found. Is it powered on and in range?")
         sys.exit(1)
-    print(f"Found {device.address}, connecting...")
+    print(f"Found {device.name} @ {device.address}, connecting...")
+    return device
+
+
+async def read_chars(*char_uuids: str) -> list[str]:
+    device = await find_device()
     async with BleakClient(device) as client:
         return [(await client.read_gatt_char(uuid)).decode() for uuid in char_uuids]
 
 
 async def send(char_uuid: str, payload: str):
-    print(f"Looking for {DEVICE_NAME}...")
-    device = await BleakScanner.find_device_by_name(DEVICE_NAME, timeout=15)
-    if not device:
-        print(f"ERROR: '{DEVICE_NAME}' not found. Is it powered on and in range?")
-        sys.exit(1)
-    print(f"Found {device.address}, connecting...")
+    device = await find_device()
     async with BleakClient(device) as client:
         await client.write_gatt_char(char_uuid, payload.encode(), response=True)
         print(f"Sent: {payload}")

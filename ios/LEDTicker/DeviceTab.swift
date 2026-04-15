@@ -52,7 +52,7 @@ struct DeviceTab: View {
                         .foregroundStyle(statusTint)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("LED-Ticker").font(.body)
+                    Text(ble.peripheralName ?? "LED-Ticker").font(.body)
                     Text(connectionLabel)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
