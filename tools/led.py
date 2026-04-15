@@ -8,6 +8,7 @@
 Usage:
     uv run tools/led.py tickers AAPL MSFT GOOGL
     uv run tools/led.py messages "Take a break!" "Drink water!" "Stand up!"
+    uv run tools/led.py locations "Seattle, WA" 98052
     uv run tools/led.py mode stocks
     uv run tools/led.py mode messages
 """
@@ -24,6 +25,7 @@ MSGS_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26aa"
 CMD_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26ab"
 WIFI_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26ac"
 APIKEY_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26ad"
+LOCS_CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26ae"
 
 
 async def read_chars(*char_uuids: str) -> list[str]:
@@ -69,10 +71,26 @@ def cmd_messages(args):
 
 
 def cmd_mode(args):
-    if not args or args[0] not in ("stocks", "messages"):
-        print("Usage: led.py mode stocks|messages")
+    if not args or args[0] not in ("stocks", "messages", "weather"):
+        print("Usage: led.py mode stocks|messages|weather")
         sys.exit(1)
     asyncio.run(send(MODE_CHAR_UUID, args[0]))
+
+
+def cmd_locations(args):
+    if not args:
+        print('Usage: led.py locations "City, State" [ZIP ...]')
+        sys.exit(1)
+    cleaned = [a.strip() for a in args if a.strip()]
+    for loc in cleaned:
+        if "|" in loc:
+            print("ERROR: location cannot contain '|'")
+            sys.exit(1)
+    payload = "|".join(cleaned)
+    if len(payload.encode()) >= 205:  # MAX_LOCATIONS * (MAX_LOCATION_LEN + 1)
+        print(f"ERROR: locations too long ({len(payload.encode())} bytes)")
+        sys.exit(1)
+    asyncio.run(send(LOCS_CHAR_UUID, payload))
 
 
 def cmd_apikey(args):
@@ -104,6 +122,13 @@ GET_READABLE = {
             f"  {i + 1}. {m}" for i, m in enumerate(v.split("|") if v else [])
         ),
     ),
+    "locations": (
+        LOCS_CHAR_UUID,
+        lambda v: "\n".join(
+            f"  {i + 1}. {loc}" for i, loc in enumerate(v.split("|") if v else [])
+        )
+        or "(none)",
+    ),
     "mode": (MODE_CHAR_UUID, lambda v: v or "(unknown)"),
 }
 
@@ -133,6 +158,7 @@ def cmd_reset(_args):
 COMMANDS = {
     "tickers": cmd_tickers,
     "messages": cmd_messages,
+    "locations": cmd_locations,
     "mode": cmd_mode,
     "apikey": cmd_apikey,
     "wifi": cmd_wifi,
@@ -145,15 +171,16 @@ if __name__ == "__main__":
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
         print("Usage: led.py <command> [args...]")
         print()
-        print("  tickers  AAPL MSFT GOOGL        set stock symbols and reload quotes")
-        print("  messages 'msg1' 'msg2' ...       set scrolling messages (persisted)")
-        print("  mode     stocks|messages         switch display mode")
-        print("  apikey   KEY                      set Finnhub API key")
+        print("  tickers   AAPL MSFT GOOGL         set stock symbols and reload quotes")
+        print("  messages  'msg1' 'msg2' ...        set scrolling messages (persisted)")
+        print("  locations 'Seattle, WA' 98052 ...  set weather locations (zip or city)")
+        print("  mode      stocks|messages|weather  switch display mode")
+        print("  apikey    KEY                      set Finnhub API key")
         print(
-            "  wifi     SSID PASSWORD            update WiFi credentials and reconnect"
+            "  wifi      SSID PASSWORD             update WiFi credentials and reconnect"
         )
-        print("  get      wifi|apikey|tickers|messages|mode  read a setting")
-        print("  reload                           force immediate stock refresh")
-        print("  reset                            clear NVS and revert to defaults")
+        print("  get       wifi|apikey|tickers|messages|locations|mode  read a setting")
+        print("  reload                            force immediate stock refresh")
+        print("  reset                             clear NVS and revert to defaults")
         sys.exit(1)
     COMMANDS[sys.argv[1]](sys.argv[2:])

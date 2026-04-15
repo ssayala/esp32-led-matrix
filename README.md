@@ -6,6 +6,7 @@ Scrolling message board and stock ticker using a Freenove ESP32-S3 and a DIYable
 
 - Scrolling text display on a 32x8 LED matrix
 - Live stock quotes from Finnhub API
+- Live weather for multiple locations (Open-Meteo, zip or "City, State")
 - No secrets at build time — WiFi credentials and API key configured via BLE and stored in NVS
 - Bluetooth (BLE) control — update WiFi, API key, stock symbols, messages, and display mode wirelessly
 - Companion [iOS app](ios/README.md) (SwiftUI + CoreBluetooth) mirrors the Python CLI
@@ -77,9 +78,13 @@ uv run tools/led.py tickers AAPL TSLA NVDA SPY
 # Set scrolling messages (persisted across reboots)
 uv run tools/led.py messages "Take a break!" "Drink water!" "Stand up!"
 
+# Set weather locations (zip codes or "City, State" to disambiguate)
+uv run tools/led.py locations "Seattle, WA" "Redmond, WA" 98052
+
 # Switch display mode
 uv run tools/led.py mode stocks
 uv run tools/led.py mode messages
+uv run tools/led.py mode weather
 
 # Update WiFi credentials and reconnect (SSID may contain spaces)
 uv run tools/led.py wifi My Network Name password123
@@ -110,11 +115,13 @@ For building a custom app (e.g. iOS with CoreBluetooth):
 | Command | `beb5483e-36e1-4688-b7f5-ea07361b26ab` | write |
 | WiFi | `beb5483e-36e1-4688-b7f5-ea07361b26ac` | read/write (read returns SSID only) |
 | API Key | `beb5483e-36e1-4688-b7f5-ea07361b26ad` | read/write |
+| Locations | `beb5483e-36e1-4688-b7f5-ea07361b26ae` | read/write |
 
 Payload formats:
 - **Tickers:** comma-separated symbols — `AAPL,MSFT,GOOGL`
-- **Mode:** `stocks` or `messages`
+- **Mode:** `stocks`, `messages`, or `weather`
 - **Messages:** pipe-separated strings — `Take a break!|Drink water!|Stand up!` (max 511 bytes)
+- **Locations:** pipe-separated zip codes or `City, State` strings — `Seattle, WA|98052|Redmond, WA`. The device geocodes each via Open-Meteo on first fetch and caches the result; when a query contains a trailing `, XX`, the `XX` is used as a state/region filter to disambiguate duplicate city names.
 - **Command:** `reload` (force stock refresh) or `reset` (clear NVS, revert to `config.h` defaults)
 - **WiFi:** `SSID|password` — updates credentials, saves to NVS, reconnects immediately
 - **API Key:** plain string — Finnhub API key, saved to NVS, triggers immediate stock fetch

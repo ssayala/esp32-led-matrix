@@ -10,6 +10,10 @@
 #include <NimBLEDevice.h>
 #include "config.h"
 
+// --- Display Mode ---
+enum { MODE_STOCKS, MODE_MESSAGES, MODE_WEATHER, MODE_COUNT };
+extern int currentMode;
+
 // --- Hardware & Display Config ---
 
 #define HARDWARE_TYPE   MD_MAX72XX::FC16_HW
@@ -21,8 +25,7 @@
 #define TOUCH_THRESHOLD 30000
 #define SCROLL_SPEED    50
 
-Preferences prefs;       // used on Core 1 only (setup + BLE apply handlers)
-Preferences stockPrefs;  // used on Core 0 only (fetch task: save/load stock cache)
+Preferences prefs;  // used on Core 1 only (setup + BLE apply handlers)
 
 // --- WiFi Credentials ---
 
@@ -97,10 +100,9 @@ bool apiKeyConfigured() { return nvsApiKey[0] != '\0'; }
 
 // --- Fetch Limits ---
 
-#define MAX_RESPONSE_BYTES 2048
-#define MAX_STRING_LEN 256
-#define MAX_MESSAGES 20
-#define MAX_STOCKS 10
+#define MAX_STRING_LEN 96     // scroll buffer + message store cell size
+#define MAX_MESSAGES   10
+#define MAX_STOCKS     10
 #define FETCH_INTERVAL_MS (5 * 60 * 1000)
 
 // --- Display ---
@@ -133,10 +135,6 @@ int getTotalMessages()
 
 const char *getMessage(int idx)
 {
-  if (!wifiConfigured())
-    return "Set WiFi via BLE: led.py wifi SSID PASS";
-  if (!apiKeyConfigured())
-    return "Set Finnhub key via BLE: led.py apikey KEY";
   if (messageCount > 0)
     return messageStore[idx % messageCount];
   return fallbackMessages[idx % fallbackCount];
@@ -153,7 +151,6 @@ void saveMessagesToNVS()
     prefs.putString(key, messageStore[i]);
   }
   prefs.end();
-  Serial.printf("Saved %d messages to NVS\n", messageCount);
 }
 
 void loadMessagesFromNVS()
@@ -186,17 +183,25 @@ void loadMessagesFromNVS()
 char nvsTickers[MAX_STOCKS][MAX_TICKER_LEN];
 int nvsTickerCount = 0;
 
-char stockDisplay[MAX_STOCKS][MAX_STRING_LEN + 1];
-int stockCount = 0;
+struct StockQuote
+{
+  char  symbol[MAX_TICKER_LEN];
+  float price;
+  float changePct;
+};
+
+StockQuote stockQuotes[MAX_STOCKS];
+int stockCount   = 0;
 int currentStock = 0;
 
 // Fetch task — runs on Core 0 alongside the WiFi/BLE stack
-#define FETCH_TASK_STACK 8192  // covers tmp[MAX_STOCKS][MAX_STRING_LEN+1] + HTTP buffers
-static SemaphoreHandle_t stockMutex     = nullptr;
+#define FETCH_TASK_STACK 8192
+static SemaphoreHandle_t dataMutex      = nullptr;
 static TaskHandle_t      fetchTaskHandle = nullptr;
 // MD_Parola stores the pointer passed to displayScroll, not a copy.
-// This buffer persists for the duration of each scroll.
-static char stockScrollBuf[MAX_STRING_LEN + 1];
+// Shared across stock/weather/message scrolls — only one is ever active,
+// and we overwrite only when starting the next scroll.
+static char scrollBuf[MAX_STRING_LEN + 1];
 
 void saveTickersToNVS()
 {
@@ -209,7 +214,6 @@ void saveTickersToNVS()
     prefs.putString(key, nvsTickers[i]);
   }
   prefs.end();
-  Serial.printf("Saved %d tickers to NVS\n", nvsTickerCount);
 }
 
 void loadTickersFromNVS()
@@ -243,6 +247,95 @@ void loadTickersFromNVS()
   }
 }
 
+// --- Weather ---
+
+#define MAX_LOCATIONS     5
+#define MAX_LOCATION_LEN  40   // user-entered "City, State" or zip
+#define MAX_LOC_NAME_LEN  24   // canonical name from geocoder
+
+char nvsLocations[MAX_LOCATIONS][MAX_LOCATION_LEN];
+int  nvsLocationCount = 0;
+
+struct ResolvedLocation
+{
+  bool  ok;
+  float lat;
+  float lon;
+  char  name[MAX_LOC_NAME_LEN];
+};
+ResolvedLocation resolved[MAX_LOCATIONS];
+
+struct WeatherReading
+{
+  char  name[MAX_LOC_NAME_LEN];
+  float tempF;
+  int   wmo;
+};
+
+WeatherReading weatherReadings[MAX_LOCATIONS];
+int  weatherCount   = 0;
+int  currentWeather = 0;
+
+static const char *wmoToString(int code)
+{
+  if (code == 0) return "Clear";
+  if (code <= 3) return "Cloudy";
+  if (code == 45 || code == 48) return "Fog";
+  if (code >= 51 && code <= 57) return "Drizzle";
+  if (code >= 61 && code <= 67) return "Rain";
+  if (code >= 71 && code <= 77) return "Snow";
+  if (code >= 80 && code <= 82) return "Showers";
+  if (code == 85 || code == 86) return "Snow";
+  if (code >= 95) return "Storm";
+  return "?";
+}
+
+void saveLocationsToNVS()
+{
+  prefs.begin("locs", false);
+  prefs.putInt("count", nvsLocationCount);
+  for (int i = 0; i < nvsLocationCount; i++)
+  {
+    char key[8];
+    snprintf(key, sizeof(key), "l%d", i);
+    prefs.putString(key, nvsLocations[i]);
+  }
+  prefs.end();
+}
+
+void loadLocationsFromNVS()
+{
+  prefs.begin("locs", true);
+  int count = prefs.getInt("count", 0);
+  if (count > 0 && count <= MAX_LOCATIONS)
+  {
+    for (int i = 0; i < count; i++)
+    {
+      char key[8];
+      snprintf(key, sizeof(key), "l%d", i);
+      prefs.getString(key, nvsLocations[i], MAX_LOCATION_LEN);
+    }
+    prefs.end();
+    nvsLocationCount = count;
+    Serial.printf("Loaded %d locations from NVS\n", count);
+  }
+  else
+  {
+    prefs.end();
+    // First boot: seed from config.h defaults
+    for (int i = 0; i < defaultLocationCount && i < MAX_LOCATIONS; i++)
+    {
+      strncpy(nvsLocations[i], defaultLocations[i], MAX_LOCATION_LEN - 1);
+      nvsLocations[i][MAX_LOCATION_LEN - 1] = '\0';
+    }
+    nvsLocationCount = defaultLocationCount;
+    saveLocationsToNVS();
+    Serial.printf("Seeded %d locations from defaults\n", nvsLocationCount);
+  }
+  for (int i = 0; i < MAX_LOCATIONS; i++)
+    resolved[i].ok = false;
+}
+
 // --- BLE ---
 
 #define BLE_DEVICE_NAME       "LED-Ticker"
@@ -253,9 +346,11 @@ void loadTickersFromNVS()
 #define BLE_CMD_CHAR_UUID     "beb5483e-36e1-4688-b7f5-ea07361b26ab"
 #define BLE_WIFI_CHAR_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26ac"
 #define BLE_APIKEY_CHAR_UUID  "beb5483e-36e1-4688-b7f5-ea07361b26ad"
+#define BLE_LOCS_CHAR_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26ae"
 #define BLE_TICKER_BUF_LEN    (MAX_STOCKS * (MAX_TICKER_LEN + 1))
 #define BLE_MSGS_BUF_LEN      512
 #define BLE_WIFI_BUF_LEN      (WIFI_SSID_MAX + WIFI_PASS_MAX + 1)
+#define BLE_LOCS_BUF_LEN      (MAX_LOCATIONS * (MAX_LOCATION_LEN + 1))
 
 volatile bool tickerUpdatePending = false;
 volatile bool modeUpdatePending   = false;
@@ -263,6 +358,7 @@ volatile bool msgsUpdatePending   = false;
 volatile bool cmdPending          = false;
 volatile bool wifiUpdatePending   = false;
 volatile bool apiKeyUpdatePending = false;
+volatile bool locsUpdatePending   = false;
 
 char pendingTickerStr[BLE_TICKER_BUF_LEN];
 char pendingModeStr[16];
@@ -270,6 +366,7 @@ char pendingMsgsStr[BLE_MSGS_BUF_LEN];
 char pendingCmd[16];
 char pendingWifiStr[BLE_WIFI_BUF_LEN];
 char pendingApiKey[MAX_APIKEY_LEN];
+char pendingLocsStr[BLE_LOCS_BUF_LEN];
 
 // Minimum ms between writes that trigger network activity
 #define BLE_FETCH_COOLDOWN_MS 10000
@@ -291,7 +388,6 @@ class TickerCallbacks : public NimBLECharacteristicCallbacks
       pendingTickerStr[val.length()] = '\0';
       tickerUpdatePending = true;
       lastBLEFetchMs = millis();
-      Serial.printf("BLE tickers: \"%s\"\n", pendingTickerStr);
     }
   }
 
@@ -312,7 +408,16 @@ class TickerCallbacks : public NimBLECharacteristicCallbacks
   }
 };
 
-extern bool showStocks;
+static const char *modeName(int m)
+{
+  switch (m)
+  {
+    case MODE_STOCKS:   return "stocks";
+    case MODE_MESSAGES: return "messages";
+    case MODE_WEATHER:  return "weather";
+  }
+  return "?";
+}
 
 class ModeCallbacks : public NimBLECharacteristicCallbacks
 {
@@ -324,13 +429,12 @@ class ModeCallbacks : public NimBLECharacteristicCallbacks
       memcpy(pendingModeStr, val.c_str(), val.length());
       pendingModeStr[val.length()] = '\0';
       modeUpdatePending = true;
-      Serial.printf("BLE mode: \"%s\"\n", pendingModeStr);
     }
   }
 
   void onRead(NimBLECharacteristic *pChar) override
   {
-    const char *mode = showStocks ? "stocks" : "messages";
+    const char *mode = modeName(currentMode);
     pChar->setValue((uint8_t *)mode, strlen(mode));
   }
 };
@@ -345,7 +449,6 @@ class MsgsCallbacks : public NimBLECharacteristicCallbacks
       memcpy(pendingMsgsStr, val.c_str(), val.length());
       pendingMsgsStr[val.length()] = '\0';
       msgsUpdatePending = true;
-      Serial.printf("BLE messages: %d bytes\n", val.length());
     }
   }
 
@@ -366,7 +469,6 @@ class MsgsCallbacks : public NimBLECharacteristicCallbacks
     }
     buf[len] = '\0';
     pChar->setValue((uint8_t *)buf, len);
-    Serial.println("BLE messages: read");
   }
 };
 
@@ -380,7 +482,6 @@ class WifiCallbacks : public NimBLECharacteristicCallbacks
       memcpy(pendingWifiStr, val.c_str(), val.length());
       pendingWifiStr[val.length()] = '\0';
       wifiUpdatePending = true;
-      Serial.println("BLE wifi: credentials received");
     }
   }
 
@@ -401,13 +502,48 @@ class ApiKeyCallbacks : public NimBLECharacteristicCallbacks
       memcpy(pendingApiKey, val.c_str(), val.length());
       pendingApiKey[val.length()] = '\0';
       apiKeyUpdatePending = true;
-      Serial.println("BLE apikey: key received");
     }
   }
 
   void onRead(NimBLECharacteristic *pChar) override
   {
     pChar->setValue((uint8_t *)nvsApiKey, strlen(nvsApiKey));
+  }
+};
+
+class LocsCallbacks : public NimBLECharacteristicCallbacks
+{
+  void onWrite(NimBLECharacteristic *pChar) override
+  {
+    if (millis() - lastBLEFetchMs < BLE_FETCH_COOLDOWN_MS)
+    {
+      Serial.println("BLE locations: cooldown, ignoring");
+      return;
+    }
+    std::string val = pChar->getValue();
+    if (val.length() > 0 && val.length() < BLE_LOCS_BUF_LEN)
+    {
+      memcpy(pendingLocsStr, val.c_str(), val.length());
+      pendingLocsStr[val.length()] = '\0';
+      locsUpdatePending = true;
+      lastBLEFetchMs = millis();
+    }
+  }
+
+  void onRead(NimBLECharacteristic *pChar) override
+  {
+    char buf[BLE_LOCS_BUF_LEN];
+    int len = 0;
+    for (int i = 0; i < nvsLocationCount && len < (int)sizeof(buf) - 1; i++)
+    {
+      if (i > 0 && len < (int)sizeof(buf) - 1) buf[len++] = '|';
+      int remaining = sizeof(buf) - 1 - len;
+      int llen = strnlen(nvsLocations[i], remaining);
+      memcpy(buf + len, nvsLocations[i], llen);
+      len += llen;
+    }
+    buf[len] = '\0';
+    pChar->setValue((uint8_t *)buf, len);
   }
 };
 
@@ -431,7 +567,6 @@ class CmdCallbacks : public NimBLECharacteristicCallbacks
     pendingCmd[val.length()] = '\0';
     cmdPending = true;
     if (fetchCmd) lastBLEFetchMs = millis();
-    Serial.printf("BLE cmd: \"%s\"\n", pendingCmd);
   }
 };
 
@@ -454,6 +589,8 @@ void initBLE()
     ->setCallbacks(new WifiCallbacks());
   pService->createCharacteristic(BLE_APIKEY_CHAR_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE)
     ->setCallbacks(new ApiKeyCallbacks());
+  pService->createCharacteristic(BLE_LOCS_CHAR_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE)
+    ->setCallbacks(new LocsCallbacks());
 
   pService->start();
   NimBLEAdvertising *pAdv = NimBLEDevice::getAdvertising();
@@ -462,51 +599,14 @@ void initBLE()
   Serial.println("BLE advertising as " BLE_DEVICE_NAME);
 }
 
-static void commitStocks(const char tmp[][MAX_STRING_LEN + 1], int count)
+static void commitStocks(const StockQuote *tmp, int count)
 {
-  xSemaphoreTake(stockMutex, portMAX_DELAY);
+  xSemaphoreTake(dataMutex, portMAX_DELAY);
   for (int i = 0; i < count; i++)
-    memcpy(stockDisplay[i], tmp[i], MAX_STRING_LEN + 1);
+    stockQuotes[i] = tmp[i];
   stockCount   = count;
   currentStock = 0;
-  xSemaphoreGive(stockMutex);
-}
-
-void saveStocksToCache()
-{
-  stockPrefs.begin("stocks", false);
-  stockPrefs.putInt("count", stockCount);
-  for (int i = 0; i < stockCount; i++)
-  {
-    char key[8];
-    snprintf(key, sizeof(key), "s%d", i);
-    stockPrefs.putString(key, stockDisplay[i]);
-  }
-  stockPrefs.end();
-  Serial.println("Stocks cached to NVS");
-}
-
-void loadStocksFromCache()
-{
-  stockPrefs.begin("stocks", true);
-  int count = stockPrefs.getInt("count", 0);
-  if (count <= 0 || count > MAX_STOCKS)
-  {
-    stockPrefs.end();
-    return;
-  }
-
-  char tmp[MAX_STOCKS][MAX_STRING_LEN + 1];
-  for (int i = 0; i < count; i++)
-  {
-    char key[8];
-    snprintf(key, sizeof(key), "s%d", i);
-    stockPrefs.getString(key, tmp[i], MAX_STRING_LEN);
-  }
-  stockPrefs.end();
-
-  commitStocks(tmp, count);
-  Serial.printf("Loaded %d stocks from cache\n", count);
+  xSemaphoreGive(dataMutex);
 }
 
 // --- Time / Market Hours ---
@@ -557,20 +657,18 @@ static void fetchStocksImpl(bool force)
   if (!apiKeyConfigured() || WiFi.status() != WL_CONNECTED)
     return;
 
-  if (!force && !isMarketOpen())
-  {
-    if (stockCount == 0)
-      loadStocksFromCache();
-    if (stockCount > 0)
-      return;
-  }
+  // Market closed: keep whatever we last fetched in RAM. Only hit the API
+  // if we have no data at all (e.g. cold boot on a weekend).
+  if (!force && !isMarketOpen() && stockCount > 0)
+    return;
 
-  // Build results into a local buffer — no lock needed during HTTP
-  char tmp[MAX_STOCKS][MAX_STRING_LEN + 1];
+  StockQuote tmp[MAX_STOCKS];
   int count = 0;
+
   HTTPClient http;
   http.setConnectTimeout(5000);
   http.setTimeout(5000);
+  http.setReuse(true);  // keep TLS session across same-host requests
 
   for (int i = 0; i < nvsTickerCount && count < MAX_STOCKS; i++)
   {
@@ -579,7 +677,6 @@ static void fetchStocksImpl(bool force)
              "https://finnhub.io/api/v1/quote?symbol=%s&token=%s",
              nvsTickers[i], nvsApiKey);
 
-    Serial.printf("Fetching stock: %s\n", nvsTickers[i]);
     http.begin(url);
 
     int code = http.GET();
@@ -593,9 +690,6 @@ static void fetchStocksImpl(bool force)
     String body = http.getString();
     http.end();
 
-    if (body.length() > MAX_RESPONSE_BYTES)
-      continue;
-
     JsonDocument doc;
     if (deserializeJson(doc, body))
       continue;
@@ -606,9 +700,11 @@ static void fetchStocksImpl(bool force)
     if (current == 0)
       continue;
 
-    const char *sign = change >= 0 ? "(+)" : "(-)";
-    snprintf(tmp[count], MAX_STRING_LEN, "%s $%.2f %s", nvsTickers[i], current, sign);
-    Serial.printf("Stock: %s\n", tmp[count]);
+    strncpy(tmp[count].symbol, nvsTickers[i], MAX_TICKER_LEN - 1);
+    tmp[count].symbol[MAX_TICKER_LEN - 1] = '\0';
+    tmp[count].price     = current;
+    tmp[count].changePct = change;
+    Serial.printf("Stock: %s $%.2f %+.2f%%\n", tmp[count].symbol, current, change);
     count++;
   }
 
@@ -616,7 +712,171 @@ static void fetchStocksImpl(bool force)
   {
     commitStocks(tmp, count);
     Serial.printf("Loaded %d stock quotes\n", count);
-    saveStocksToCache();
+  }
+}
+
+static void commitWeather(const WeatherReading *tmp, int count)
+{
+  xSemaphoreTake(dataMutex, portMAX_DELAY);
+  for (int i = 0; i < count; i++)
+    weatherReadings[i] = tmp[i];
+  weatherCount   = count;
+  currentWeather = 0;
+  xSemaphoreGive(dataMutex);
+}
+
+// URL-encodes spaces and commas — the only chars we expect in location queries.
+static void urlEncodeLocation(const char *in, char *out, int outLen)
+{
+  int j = 0;
+  for (int i = 0; in[i] && j < outLen - 4; i++)
+  {
+    unsigned char c = (unsigned char)in[i];
+    if (c == ' ')      { out[j++] = '%'; out[j++] = '2'; out[j++] = '0'; }
+    else if (c == ',') { out[j++] = '%'; out[j++] = '2'; out[j++] = 'C'; }
+    else               { out[j++] = c; }
+  }
+  out[j] = '\0';
+}
+
+// Resolves a user-entered string ("98052" or "Redmond, WA") to lat/lon.
+// If the query contains a trailing ", XX" we use it as an admin1 (state) filter.
+static bool geocodeLocation(HTTPClient &http, const char *query, ResolvedLocation &out)
+{
+  char name[MAX_LOCATION_LEN];
+  char region[MAX_LOCATION_LEN];
+  strncpy(name, query, sizeof(name) - 1);
+  name[sizeof(name) - 1] = '\0';
+  region[0] = '\0';
+
+  char *comma = strchr(name, ',');
+  if (comma)
+  {
+    *comma = '\0';
+    const char *r = comma + 1;
+    while (*r == ' ') r++;
+    strncpy(region, r, sizeof(region) - 1);
+    region[sizeof(region) - 1] = '\0';
+    int rlen = strlen(region);
+    while (rlen > 0 && region[rlen - 1] == ' ') region[--rlen] = '\0';
+  }
+
+  char encoded[MAX_LOCATION_LEN * 3];
+  urlEncodeLocation(name, encoded, sizeof(encoded));
+
+  char url[256];
+  snprintf(url, sizeof(url),
+           "https://geocoding-api.open-meteo.com/v1/search?name=%s&count=5",
+           encoded);
+
+  http.begin(url);
+  int code = http.GET();
+  if (code != 200)
+  {
+    Serial.printf("Geocode HTTP error: %d for \"%s\"\n", code, query);
+    http.end();
+    return false;
+  }
+
+  String body = http.getString();
+  http.end();
+
+  JsonDocument doc;
+  if (deserializeJson(doc, body))
+    return false;
+
+  JsonVariant results = doc["results"];
+  if (results.isNull() || results.size() == 0)
+  {
+    Serial.printf("Geocode: no results for \"%s\"\n", query);
+    return false;
+  }
+
+  JsonVariant pick;
+  if (region[0] != '\0')
+  {
+    for (JsonVariant r : results.as<JsonArray>())
+    {
+      const char *admin1 = r["admin1"] | "";
+      const char *ccode  = r["country_code"] | "";
+      if (strcasecmp(admin1, region) == 0 || strcasecmp(ccode, region) == 0)
+      {
+        pick = r;
+        break;
+      }
+    }
+  }
+  if (pick.isNull())
+    pick = results[0];
+
+  out.lat = pick["latitude"];
+  out.lon = pick["longitude"];
+  const char *resolvedName = pick["name"] | name;
+  strncpy(out.name, resolvedName, MAX_LOC_NAME_LEN - 1);
+  out.name[MAX_LOC_NAME_LEN - 1] = '\0';
+  out.ok = true;
+  return true;
+}
+
+static void fetchWeatherImpl()
+{
+  if (WiFi.status() != WL_CONNECTED || nvsLocationCount == 0)
+    return;
+
+  HTTPClient http;
+  http.setConnectTimeout(5000);
+  http.setTimeout(5000);
+  http.setReuse(true);  // keep TLS session across same-host requests
+
+  WeatherReading tmp[MAX_LOCATIONS];
+  int count = 0;
+
+  for (int i = 0; i < nvsLocationCount && count < MAX_LOCATIONS; i++)
+  {
+    if (!resolved[i].ok)
+    {
+      if (!geocodeLocation(http, nvsLocations[i], resolved[i]))
+        continue;
+      Serial.printf("Geocoded \"%s\" -> %s (%.4f,%.4f)\n",
+                    nvsLocations[i], resolved[i].name,
+                    resolved[i].lat, resolved[i].lon);
+    }
+
+    char url[256];
+    snprintf(url, sizeof(url),
+             "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
+             "&current=temperature_2m,weather_code&temperature_unit=fahrenheit",
+             resolved[i].lat, resolved[i].lon);
+
+    http.begin(url);
+    int code = http.GET();
+    if (code != 200)
+    {
+      Serial.printf("Weather HTTP error: %d for %s\n", code, resolved[i].name);
+      http.end();
+      continue;
+    }
+
+    String body = http.getString();
+    http.end();
+
+    JsonDocument doc;
+    if (deserializeJson(doc, body))
+      continue;
+
+    strncpy(tmp[count].name, resolved[i].name, MAX_LOC_NAME_LEN - 1);
+    tmp[count].name[MAX_LOC_NAME_LEN - 1] = '\0';
+    tmp[count].tempF = doc["current"]["temperature_2m"];
+    tmp[count].wmo   = doc["current"]["weather_code"];
+    Serial.printf("Weather: %s %.0fF %s\n",
+                  tmp[count].name, tmp[count].tempF, wmoToString(tmp[count].wmo));
+    count++;
+  }
+
+  if (count > 0)
+  {
+    commitWeather(tmp, count);
+    Serial.printf("Loaded %d weather entries\n", count);
   }
 }
 
@@ -627,6 +887,7 @@ static void fetchTask(void *)
     uint32_t forceVal;
     xTaskNotifyWait(0, 0, &forceVal, portMAX_DELAY);
     fetchStocksImpl((bool)forceVal);
+    fetchWeatherImpl();
   }
 }
 
@@ -637,20 +898,33 @@ void triggerFetch(bool force = false)
 
 // --- Touch Button ---
 
-bool showStocks = true;
+#define TOUCH_DELTA 40000  // increase above baseline required to count as a touch
+
+int currentMode = MODE_STOCKS;
 unsigned long lastTouchTime = 0;
 unsigned long lastTouchPoll = 0;
+static uint32_t touchBaseline = 0;
+
+void calibrateTouch()
+{
+  uint32_t sum = 0;
+  for (int i = 0; i < 16; i++) { sum += touchRead(TOUCH_PIN); delay(10); }
+  touchBaseline = sum / 16;
+  Serial.printf("Touch baseline: %lu (trigger above: %lu)\n",
+                touchBaseline, touchBaseline + TOUCH_DELTA);
+}
 
 void checkTouch()
 {
   if (millis() - lastTouchPoll < 50) return;
   lastTouchPoll = millis();
 
-  if (touchRead(TOUCH_PIN) > TOUCH_THRESHOLD && millis() - lastTouchTime > 2000)
+  uint32_t val = touchRead(TOUCH_PIN);
+  if (val > touchBaseline + TOUCH_DELTA && millis() - lastTouchTime > 2000)
   {
-    showStocks = !showStocks;
+    currentMode = (currentMode + 1) % MODE_COUNT;
     lastTouchTime = millis();
-    Serial.printf("Touch: mode -> %s\n", showStocks ? "STOCKS" : "MESSAGES");
+    Serial.printf("Touch: mode -> %s\n", modeName(currentMode));
   }
 }
 
@@ -665,20 +939,49 @@ void showNextMsg()
 
 void showNextStock()
 {
-  xSemaphoreTake(stockMutex, portMAX_DELAY);
-  strncpy(stockScrollBuf, stockDisplay[currentStock], MAX_STRING_LEN);
-  stockScrollBuf[MAX_STRING_LEN] = '\0';
+  StockQuote q;
+  xSemaphoreTake(dataMutex, portMAX_DELAY);
+  q = stockQuotes[currentStock];
   currentStock = (currentStock + 1) % stockCount;
-  xSemaphoreGive(stockMutex);
-  scrollText(stockScrollBuf);
+  xSemaphoreGive(dataMutex);
+
+  const char *arrow = q.changePct >= 0 ? "\x18" : "\x19";
+  snprintf(scrollBuf, sizeof(scrollBuf),
+           "%s $%.2f %s", q.symbol, q.price, arrow);
+  scrollText(scrollBuf);
+}
+
+void showNextWeather()
+{
+  WeatherReading w;
+  xSemaphoreTake(dataMutex, portMAX_DELAY);
+  w = weatherReadings[currentWeather];
+  currentWeather = (currentWeather + 1) % weatherCount;
+  xSemaphoreGive(dataMutex);
+
+  snprintf(scrollBuf, sizeof(scrollBuf),
+           "%s %.0f\xB0""F %s", w.name, w.tempF, wmoToString(w.wmo));
+  scrollText(scrollBuf);
 }
 
 void showNext()
 {
-  if (wifiConfigured() && apiKeyConfigured() && showStocks && stockCount > 0)
+  if (currentMode == MODE_STOCKS)
+  {
+    if (!wifiConfigured())   { scrollText("Configure WiFi over BLE"); return; }
+    if (!apiKeyConfigured()) { scrollText("Set Finnhub key over BLE"); return; }
+    if (stockCount == 0)     { scrollText("Loading stocks..."); return; }
     showNextStock();
-  else
-    showNextMsg();
+    return;
+  }
+  if (currentMode == MODE_WEATHER)
+  {
+    if (!wifiConfigured())  { scrollText("Configure WiFi over BLE"); return; }
+    if (weatherCount == 0)  { scrollText("Loading weather..."); return; }
+    showNextWeather();
+    return;
+  }
+  showNextMsg();
 }
 
 // --- WiFi ---
@@ -770,13 +1073,16 @@ void applyPendingCmd()
     prefs.begin("apikey",  false); prefs.clear(); prefs.end();
     prefs.begin("tickers", false); prefs.clear(); prefs.end();
     prefs.begin("msgs",    false); prefs.clear(); prefs.end();
-    prefs.begin("stocks",  false); prefs.clear(); prefs.end();
+    prefs.begin("locs",    false); prefs.clear(); prefs.end();
 
-    loadTickersFromNVS();  // re-seeds from config.h since NVS is now empty
+    loadTickersFromNVS();    // re-seeds from config.h since NVS is now empty
+    loadLocationsFromNVS();  // same — re-seeds default locations
 
-    messageCount = 0;
-    currentMsg   = 0;
-    stockCount   = 0;
+    messageCount   = 0;
+    currentMsg     = 0;
+    stockCount     = 0;
+    weatherCount   = 0;
+    currentWeather = 0;
     triggerFetch(true);
   }
   else
@@ -788,20 +1094,15 @@ void applyPendingCmd()
 void applyPendingMode()
 {
   modeUpdatePending = false;
-  if (strcmp(pendingModeStr, "stocks") == 0)
-  {
-    showStocks = true;
-    Serial.println("BLE: mode -> STOCKS");
-  }
-  else if (strcmp(pendingModeStr, "messages") == 0)
-  {
-    showStocks = false;
-    Serial.println("BLE: mode -> MESSAGES");
-  }
+  if      (strcmp(pendingModeStr, "stocks")   == 0) currentMode = MODE_STOCKS;
+  else if (strcmp(pendingModeStr, "messages") == 0) currentMode = MODE_MESSAGES;
+  else if (strcmp(pendingModeStr, "weather")  == 0) currentMode = MODE_WEATHER;
   else
   {
     Serial.printf("BLE: unknown mode \"%s\", ignoring\n", pendingModeStr);
+    return;
   }
+  Serial.printf("BLE: mode -> %s\n", modeName(currentMode));
 }
 
 void applyPendingMessages()
@@ -888,6 +1189,49 @@ void applyPendingTickers()
   triggerFetch(true);
 }
 
+void applyPendingLocations()
+{
+  char buf[BLE_LOCS_BUF_LEN];
+  strncpy(buf, pendingLocsStr, sizeof(buf) - 1);
+  buf[sizeof(buf) - 1] = '\0';
+  locsUpdatePending = false;
+
+  char tmp[MAX_LOCATIONS][MAX_LOCATION_LEN];
+  int count = 0;
+
+  char *token = strtok(buf, "|");
+  while (token && count < MAX_LOCATIONS)
+  {
+    while (*token == ' ') token++;
+    int len = strlen(token);
+    while (len > 0 && token[len - 1] == ' ') len--;
+    token[len] = '\0';
+
+    if (len > 0 && len < MAX_LOCATION_LEN)
+    {
+      strncpy(tmp[count], token, MAX_LOCATION_LEN - 1);
+      tmp[count][MAX_LOCATION_LEN - 1] = '\0';
+      count++;
+    }
+    token = strtok(nullptr, "|");
+  }
+
+  if (count == 0)
+  {
+    Serial.println("BLE: no valid locations, ignoring");
+    return;
+  }
+
+  for (int i = 0; i < count; i++)
+    strncpy(nvsLocations[i], tmp[i], MAX_LOCATION_LEN);
+  nvsLocationCount = count;
+  for (int i = 0; i < MAX_LOCATIONS; i++)
+    resolved[i].ok = false;
+  saveLocationsToNVS();
+
+  triggerFetch(true);
+}
+
 // --- Main ---
 
 unsigned long lastFetch = 0;
@@ -897,15 +1241,16 @@ void setup()
   Serial.begin(115200);
   delay(500);
 
-  stockMutex = xSemaphoreCreateMutex();
+  dataMutex = xSemaphoreCreateMutex();
   xTaskCreatePinnedToCore(fetchTask, "fetchStocks", FETCH_TASK_STACK, nullptr, 1, &fetchTaskHandle, 0);
 
   initDisplay();
+  calibrateTouch();
   loadWifiFromNVS();
   loadApiKeyFromNVS();
   loadMessagesFromNVS();
   loadTickersFromNVS();
-  loadStocksFromCache();
+  loadLocationsFromNVS();
   showNext();
 
   connectWifi();
@@ -923,6 +1268,7 @@ void loop()
   if (modeUpdatePending)    applyPendingMode();
   if (msgsUpdatePending)    applyPendingMessages();
   if (tickerUpdatePending)  applyPendingTickers();
+  if (locsUpdatePending)    applyPendingLocations();
 
   checkTouch();
 
