@@ -82,15 +82,18 @@ ios/
 
 ## Design notes
 
-- **Single-screen form** with sections for WiFi, API key, tickers,
-  messages, mode, and reload/reset actions.
-- **Last-sent values** are persisted to `UserDefaults` via `@AppStorage`.
-  There is no readback from the device (all characteristics are
-  write-only), so the app only knows what *it* last sent — if you
-  configure the same device from `led.py`, the two will drift.
-- **Writes are queued**: every write uses `.withResponse` and the next
-  one is only issued after `didWriteValueFor` fires. This matters because
-  the firmware has a 10 s cooldown on ticker/reload/reset writes.
+- **Four-tab layout**: Device (connection, WiFi, API key, reset),
+  Stocks (tickers + show-on-display), Weather (locations + show-on-display),
+  Messages (scrolling text + show-on-display).
+- **Last-known values** are persisted to `UserDefaults` so the UI has
+  something to show before a connection is established. On connect the
+  app reads current config from the device and overwrites those fields,
+  so the UI matches real device state. The WiFi password is never
+  exposed over BLE and stays blank until the user retypes it.
+- **Writes and reads are both queued**: every operation uses
+  `.withResponse` / `readValue(for:)` and the next is only issued after
+  the corresponding delegate fires. This matters because the firmware
+  has a 10 s cooldown on ticker/reload/reset writes.
 - **Auto-reconnect**: on first successful connect the peripheral UUID is
   saved to `UserDefaults`. Subsequent launches call
   `retrievePeripherals(withIdentifiers:)` to reconnect without scanning.
@@ -104,11 +107,12 @@ ios/
 See `../README.md` and `../CLAUDE.md` for the authoritative description
 of the BLE service and its characteristics. Payload formats:
 
-| Char      | UUID suffix | Payload                              |
-|-----------|-------------|--------------------------------------|
-| tickers   | `...A8`     | `AAPL,MSFT,...` (comma-separated)    |
-| mode      | `...A9`     | `stocks` or `messages`               |
-| messages  | `...AA`     | `m1|m2|...` (≤ 511 bytes)            |
-| command   | `...AB`     | `reload` or `reset`                  |
-| wifi      | `...AC`     | `SSID|password` (split on first `|`) |
-| apikey    | `...AD`     | plain string                         |
+| Char      | UUID suffix | Payload                                       |
+|-----------|-------------|-----------------------------------------------|
+| tickers   | `...A8`     | `AAPL,MSFT,...` (comma-separated)             |
+| mode      | `...A9`     | `stocks`, `messages`, or `weather`            |
+| messages  | `...AA`     | `m1\|m2\|...` (≤ 511 bytes)                   |
+| command   | `...AB`     | `reload` or `reset`                           |
+| wifi      | `...AC`     | `SSID\|password` (split on first `\|`)        |
+| apikey    | `...AD`     | plain string                                  |
+| locations | `...AE`     | `ZIP\|City, State\|...` (≤ 5 entries, 204 B)  |

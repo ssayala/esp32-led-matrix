@@ -4,6 +4,7 @@ struct StocksTab: View {
     @EnvironmentObject var ble: BLEManager
     @EnvironmentObject var app: AppState
     @State private var newTicker = ""
+    @FocusState private var inputFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -19,6 +20,7 @@ struct StocksTab: View {
                         TextField("Add symbol (e.g. NVDA)", text: $newTicker)
                             .textInputAutocapitalization(.characters)
                             .autocorrectionDisabled()
+                            .focused($inputFocused)
                             .onSubmit(addTicker)
                         if !trimmedNew.isEmpty {
                             Button("Add", action: addTicker)
@@ -38,6 +40,7 @@ struct StocksTab: View {
                     .disabled(!canWrite)
                 }
             }
+            .scrollDismissesKeyboard(.interactively)
             .refreshable { await reloadQuotes() }
             .navigationTitle("Stocks")
             .toolbar {
@@ -46,6 +49,10 @@ struct StocksTab: View {
                     Button("Save", action: saveTickers)
                         .fontWeight(.semibold)
                         .disabled(!canWrite || app.tickers.isEmpty)
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") { inputFocused = false }
                 }
             }
         }
@@ -58,16 +65,16 @@ struct StocksTab: View {
 
     private func addTicker() {
         let t = trimmedNew.uppercased()
+        newTicker = ""
+        inputFocused = false
         guard !t.isEmpty,
               t.utf8.count <= Payloads.tickerMaxLen,
               !app.tickers.contains(t),
               app.tickers.count < Payloads.tickerMaxCount
         else {
-            newTicker = ""
             return
         }
         app.tickers.append(t)
-        newTicker = ""
     }
 
     private func saveTickers() {

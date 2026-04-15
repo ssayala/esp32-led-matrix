@@ -4,6 +4,7 @@ struct MessagesTab: View {
     @EnvironmentObject var ble: BLEManager
     @EnvironmentObject var app: AppState
     @State private var newMessage = ""
+    @FocusState private var inputFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -17,6 +18,7 @@ struct MessagesTab: View {
 
                     HStack {
                         TextField("New message", text: $newMessage)
+                            .focused($inputFocused)
                             .onSubmit(addMessage)
                         if !trimmedNew.isEmpty {
                             Button("Add", action: addMessage)
@@ -41,6 +43,7 @@ struct MessagesTab: View {
                     .disabled(!canWrite)
                 }
             }
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle("Messages")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { EditButton() }
@@ -48,6 +51,10 @@ struct MessagesTab: View {
                     Button("Save", action: saveMessages)
                         .fontWeight(.semibold)
                         .disabled(!canWrite || app.messages.isEmpty || overLimit)
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") { inputFocused = false }
                 }
             }
         }
@@ -70,12 +77,12 @@ struct MessagesTab: View {
 
     private func addMessage() {
         let m = trimmedNew
+        newMessage = ""
+        inputFocused = false
         guard !m.isEmpty, app.messages.count < Payloads.messagesMaxCount else {
-            newMessage = ""
             return
         }
         app.messages.append(m)
-        newMessage = ""
     }
 
     private func saveMessages() {

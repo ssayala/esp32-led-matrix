@@ -116,13 +116,74 @@ final class PayloadsTests: XCTestCase {
         XCTAssertEqual(str.split(separator: "|").count, 20)
     }
 
+    // MARK: - locations
+
+    func test_locations_joinsWithPipe() throws {
+        let data = try Payloads.locations(["Redmond, WA", "Seattle, WA"])
+        XCTAssertEqual(String(data: data, encoding: .utf8), "Redmond, WA|Seattle, WA")
+    }
+
+    func test_locations_trimsAndDropsEmpty() throws {
+        let data = try Payloads.locations(fromJoined: "  Redmond, WA  ||  98052  |")
+        XCTAssertEqual(String(data: data, encoding: .utf8), "Redmond, WA|98052")
+    }
+
+    func test_locations_rejectsPipeInEntry() {
+        XCTAssertThrowsError(try Payloads.locations(["Redmond|WA"])) { err in
+            guard case .invalidLocation? = err as? PayloadError else {
+                return XCTFail("wrong error: \(err)")
+            }
+        }
+    }
+
+    func test_locations_rejectsOversizedEntry() {
+        let big = String(repeating: "x", count: Payloads.locationMaxLen + 1)
+        XCTAssertThrowsError(try Payloads.locations([big])) { err in
+            guard case .invalidLocation? = err as? PayloadError else {
+                return XCTFail("wrong error: \(err)")
+            }
+        }
+    }
+
+    func test_locations_rejectsAllEmpty() {
+        XCTAssertThrowsError(try Payloads.locations(fromJoined: " | | "))
+    }
+
+    func test_locations_capsAt5() throws {
+        let many = (1...10).map { "Loc\($0)" }
+        let data = try Payloads.locations(many)
+        let str = String(data: data, encoding: .utf8)!
+        XCTAssertEqual(str.split(separator: "|").count, 5)
+        XCTAssertTrue(str.hasPrefix("Loc1|Loc2"))
+    }
+
+    func test_parseLocations_splitsOnPipe() {
+        let data = Data("Redmond, WA|98052|Paris, FR".utf8)
+        XCTAssertEqual(Payloads.parseLocations(data), ["Redmond, WA", "98052", "Paris, FR"])
+    }
+
+    func test_parseLocations_emptyReturnsEmpty() {
+        XCTAssertEqual(Payloads.parseLocations(Data()), [])
+    }
+
+    func test_parseLocations_roundTrip() throws {
+        let original = ["Redmond, WA", "98052", "Paris, FR"]
+        let encoded = try Payloads.locations(original)
+        XCTAssertEqual(Payloads.parseLocations(encoded), original)
+    }
+
     // MARK: - mode / command
 
     func test_modeAndCommand_passthrough() {
         XCTAssertEqual(String(data: Payloads.mode(.stocks), encoding: .utf8), "stocks")
         XCTAssertEqual(String(data: Payloads.mode(.messages), encoding: .utf8), "messages")
+        XCTAssertEqual(String(data: Payloads.mode(.weather), encoding: .utf8), "weather")
         XCTAssertEqual(String(data: Payloads.command("reload"), encoding: .utf8), "reload")
         XCTAssertEqual(String(data: Payloads.command("reset"), encoding: .utf8), "reset")
+    }
+
+    func test_parseMode_weather() {
+        XCTAssertEqual(Payloads.parseMode(Data("weather".utf8)), .weather)
     }
 
     // MARK: - parsers (values read back from device)

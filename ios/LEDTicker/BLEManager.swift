@@ -2,12 +2,13 @@ import Foundation
 import CoreBluetooth
 
 enum CharKind: String, CaseIterable {
-    case tickers  = "BEB5483E-36E1-4688-B7F5-EA07361B26A8"
-    case mode     = "BEB5483E-36E1-4688-B7F5-EA07361B26A9"
-    case messages = "BEB5483E-36E1-4688-B7F5-EA07361B26AA"
-    case command  = "BEB5483E-36E1-4688-B7F5-EA07361B26AB"
-    case wifi     = "BEB5483E-36E1-4688-B7F5-EA07361B26AC"
-    case apikey   = "BEB5483E-36E1-4688-B7F5-EA07361B26AD"
+    case tickers   = "BEB5483E-36E1-4688-B7F5-EA07361B26A8"
+    case mode      = "BEB5483E-36E1-4688-B7F5-EA07361B26A9"
+    case messages  = "BEB5483E-36E1-4688-B7F5-EA07361B26AA"
+    case command   = "BEB5483E-36E1-4688-B7F5-EA07361B26AB"
+    case wifi      = "BEB5483E-36E1-4688-B7F5-EA07361B26AC"
+    case apikey    = "BEB5483E-36E1-4688-B7F5-EA07361B26AD"
+    case locations = "BEB5483E-36E1-4688-B7F5-EA07361B26AE"
 
     var uuid: CBUUID { CBUUID(string: rawValue) }
 }
@@ -25,12 +26,12 @@ enum ConnectionState: Equatable {
 
 /// Thin wrapper around CoreBluetooth for the LED-Ticker peripheral.
 ///
-/// The firmware exposes six characteristics on a single service: five are
-/// read/write (tickers, mode, messages, wifi SSID, apikey) and one is
-/// write-only (command). We scan by service UUID, auto-connect to the first
-/// match (or a remembered identifier), discover characteristics, and
-/// serialize both reads and writes through simple queues so each one
-/// completes before the next is issued.
+/// The firmware exposes seven characteristics on a single service: six
+/// are read/write (tickers, mode, messages, wifi SSID, apikey, locations)
+/// and one is write-only (command). We scan by service UUID, auto-connect
+/// to the first match (or a remembered identifier), discover
+/// characteristics, and serialize both reads and writes through simple
+/// queues so each one completes before the next is issued.
 final class BLEManager: NSObject, ObservableObject {
     static let serviceUUID = CBUUID(string: "4FAFC201-1FB5-459E-8FCC-C5C9C331914B")
     private static let peripheralIdKey = "LEDTicker.peripheral.id"
