@@ -3,6 +3,10 @@
 SwiftUI + CoreBluetooth app that mirrors `tools/led.py` — configure the
 ESP32 LED Ticker over BLE from your iPhone or iPad.
 
+<p align="center">
+  <img src="screenshot.png" alt="LED Ticker iOS app screenshot" width="250">
+</p>
+
 ## Requirements
 
 - Xcode 15 or newer
