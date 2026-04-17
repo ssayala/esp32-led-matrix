@@ -29,6 +29,11 @@ extern int currentMode;
 #define TOUCH_PIN 14
 #define TOUCH_THRESHOLD 30000
 #define SCROLL_SPEED 50
+#define BRIGHTNESS_PIN 4
+#define BRIGHTNESS_POLL_MS 200
+#define BRIGHTNESS_DEADBAND 2
+#define RGB_LED_PIN 48
+#define BUZZER_PIN 5
 
 Preferences prefs; // used on Core 1 only (setup + BLE apply handlers)
 
@@ -101,6 +106,33 @@ bool apiKeyConfigured() { return nvsApiKey[0] != '\0'; }
 #define MAX_MESSAGES 10
 #define MAX_STOCKS 10
 #define FETCH_INTERVAL_MS (5 * 60 * 1000)
+
+// --- Buzzer ---
+
+volatile bool beepPending = false;
+
+void checkBeep() {
+  if (!beepPending)
+    return;
+  beepPending = false;
+  tone(BUZZER_PIN, 2000, 100);
+}
+
+// --- Status LED ---
+
+volatile bool fetching = false;
+static bool ledState = false;
+
+void updateStatusLed() {
+  if (fetching && !ledState) {
+    neopixelWrite(RGB_LED_PIN, 0, 0, 20);
+    ledState = true;
+  }
+  else if (!fetching && ledState) {
+    neopixelWrite(RGB_LED_PIN, 0, 0, 0);
+    ledState = false;
+  }
+}
 
 // --- Display ---
 
@@ -361,6 +393,7 @@ class TickerCallbacks : public NimBLECharacteristicCallbacks {
       memcpy(pendingTickerStr, val.c_str(), val.length());
       pendingTickerStr[val.length()] = '\0';
       tickerUpdatePending = true;
+      beepPending = true;
       lastBLEFetchMs = millis();
     }
   }
@@ -400,6 +433,7 @@ class ModeCallbacks : public NimBLECharacteristicCallbacks {
       memcpy(pendingModeStr, val.c_str(), val.length());
       pendingModeStr[val.length()] = '\0';
       modeUpdatePending = true;
+      beepPending = true;
     }
   }
 
@@ -416,6 +450,7 @@ class MsgsCallbacks : public NimBLECharacteristicCallbacks {
       memcpy(pendingMsgsStr, val.c_str(), val.length());
       pendingMsgsStr[val.length()] = '\0';
       msgsUpdatePending = true;
+      beepPending = true;
     }
   }
 
@@ -444,6 +479,7 @@ class WifiCallbacks : public NimBLECharacteristicCallbacks {
       memcpy(pendingWifiStr, val.c_str(), val.length());
       pendingWifiStr[val.length()] = '\0';
       wifiUpdatePending = true;
+      beepPending = true;
     }
   }
 
@@ -460,6 +496,7 @@ class ApiKeyCallbacks : public NimBLECharacteristicCallbacks {
       memcpy(pendingApiKey, val.c_str(), val.length());
       pendingApiKey[val.length()] = '\0';
       apiKeyUpdatePending = true;
+      beepPending = true;
     }
   }
 
@@ -479,6 +516,7 @@ class LocsCallbacks : public NimBLECharacteristicCallbacks {
       memcpy(pendingLocsStr, val.c_str(), val.length());
       pendingLocsStr[val.length()] = '\0';
       locsUpdatePending = true;
+      beepPending = true;
       lastBLEFetchMs = millis();
     }
   }
@@ -515,6 +553,7 @@ class CmdCallbacks : public NimBLECharacteristicCallbacks {
     memcpy(pendingCmd, val.c_str(), val.length());
     pendingCmd[val.length()] = '\0';
     cmdPending = true;
+    beepPending = true;
     if (fetchCmd)
       lastBLEFetchMs = millis();
   }
@@ -831,13 +870,38 @@ static void fetchTask(void*) {
   while (true) {
     uint32_t forceVal;
     xTaskNotifyWait(0, 0, &forceVal, portMAX_DELAY);
+    fetching = true;
     fetchStocksImpl((bool)forceVal);
     fetchWeatherImpl();
+    fetching = false;
   }
 }
 
 void triggerFetch(bool force = false) {
   xTaskNotify(fetchTaskHandle, (uint32_t)force, eSetValueWithOverwrite);
+}
+
+// --- Brightness Knob ---
+
+static unsigned long lastBrightnessPoll = 0;
+static int currentBrightness = 2;
+
+void checkBrightness() {
+  if (millis() - lastBrightnessPoll < BRIGHTNESS_POLL_MS)
+    return;
+  lastBrightnessPoll = millis();
+
+  int raw = analogRead(BRIGHTNESS_PIN);
+  // Floating pin reads near 0 with pull-down — ignore until knob is connected
+  if (raw < 50)
+    return;
+
+  int level = map(raw, 0, 4095, 0, 15);
+  if (abs(level - currentBrightness) >= BRIGHTNESS_DEADBAND) {
+    currentBrightness = level;
+    display.setIntensity(level);
+    Serial.printf("Brightness: %d/15 (ADC %d)\n", level, raw);
+  }
 }
 
 // --- Touch Button ---
@@ -1193,6 +1257,8 @@ void setup() {
   xTaskCreatePinnedToCore(fetchTask, "fetchStocks", FETCH_TASK_STACK, nullptr, 1, &fetchTaskHandle, 0);
 
   initDisplay();
+  pinMode(BRIGHTNESS_PIN, INPUT_PULLDOWN);
+  pinMode(BUZZER_PIN, OUTPUT);
   calibrateTouch();
   loadWifiFromNVS();
   loadApiKeyFromNVS();
@@ -1225,6 +1291,9 @@ void loop() {
     applyPendingLocations();
 
   checkTouch();
+  checkBrightness();
+  checkBeep();
+  updateStatusLed();
 
   if (display.displayAnimate()) {
     display.displayReset();

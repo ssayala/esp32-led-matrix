@@ -28,6 +28,9 @@ A capacitive touch input on GPIO 14 cycles between stocks, messages, and weather
 - **Display:** 4-in-1 MAX7219 8x8 LED matrix, hardware SPI with explicit pin mapping
 - **SPI pins:** DIN=GPIO11, CLK=GPIO12, CS=GPIO10 (must call `SPI.begin(CLK, -1, DIN, CS)` before display init — default ESP32-S3 SPI pins don't match)
 - **Touch:** GPIO 14, threshold 30000; polled every 50ms with a 2s debounce
+- **Brightness knob:** B10K potentiometer on GPIO 4 (ADC, optional). Internal pull-down keeps brightness at default (2/15) when not connected.
+- **Buzzer:** Passive buzzer on GPIO 5 (optional). Short 2kHz beep on every BLE write as audio confirmation.
+- **Status LED:** Onboard WS2812 RGB LED on GPIO 48. Lights blue during network fetches. Driven from `loop()` via a volatile flag set by the fetch task on Core 0.
 
 ## Configuration Model
 
@@ -50,7 +53,8 @@ The companion CLI is `tools/led.py`, invoked as `uv run tools/led.py <cmd>`:
 - **Display gating** (`showNext()`): stocks show only when WiFi+API key are configured *and* `stockCount > 0`; weather shows only when WiFi is configured *and* `weatherCount > 0`; otherwise falls through to `getMessage()`, which itself returns a setup-prompt string if WiFi or key is missing.
 - **Market-hours aware**: `isMarketOpen()` (Mon-Fri 9:30-16:00 ET) gates only *fetches*, not display. When the market is closed we keep the last-fetched quotes in RAM and skip the API call; on a cold boot with no data yet, we fetch once regardless.
 - **Geocoding**: `fetchWeatherImpl()` resolves each location string to lat/lon via Open-Meteo's geocoding API on first use and caches the result in `resolved[]` (RAM). `applyPendingLocations()` invalidates that cache by setting `resolved[i].ok = false` so the next fetch re-geocodes. A trailing `", XX"` in the user string is used as an `admin1`/`country_code` filter to disambiguate duplicate city names.
-- **Main loop** is cooperative: apply pending BLE updates → poll touch → advance display animation → fetch every `FETCH_INTERVAL_MS` (5 min) if WiFi is up. No `delay()` inside `loop()`.
+- **Main loop** is cooperative: apply pending BLE updates → poll touch → check brightness knob → check buzzer → update status LED → advance display animation → fetch every `FETCH_INTERVAL_MS` (5 min) if WiFi is up. No `delay()` inside `loop()`.
+- **Cross-core safety**: the fetch task runs on Core 0 but must not call `neopixelWrite()` or `tone()` directly. Instead it sets volatile flags (`fetching`, `beepPending`) that `loop()` on Core 1 consumes — same deferred pattern as BLE callbacks.
 
 ## BLE Service
 

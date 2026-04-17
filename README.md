@@ -11,6 +11,9 @@ Scrolling message board and stock ticker using a Freenove ESP32-S3 and a DIYable
 - Bluetooth (BLE) control — update WiFi, API key, stock symbols, messages, and display mode wirelessly
 - Companion [iOS app](ios/README.md) (SwiftUI + CoreBluetooth) mirrors the Python CLI
 - Touch-to-toggle between stocks and messages (capacitive touch on GPIO 14)
+- Analog brightness control via potentiometer (optional)
+- Audible beep on BLE command received via passive buzzer (optional)
+- Onboard RGB LED lights blue during network fetches
 - All settings persist across reboots (NVS flash storage)
 - Fallback messages shown until you set your own via BLE
 - Prompts on display if WiFi or API key not yet configured
@@ -23,6 +26,8 @@ Scrolling message board and stock ticker using a Freenove ESP32-S3 and a DIYable
 |-----------|---------|
 | MCU | Freenove ESP32-S3 |
 | Display | DIYables 4-in-1 MAX7219 8x8 LED matrix (SPI) |
+| Brightness | B10K potentiometer on GPIO 4 (optional) |
+| Buzzer | Passive buzzer on GPIO 5 (optional — beeps on BLE command) |
 
 ### Wiring
 
@@ -34,7 +39,20 @@ Scrolling message board and stock ticker using a Freenove ESP32-S3 and a DIYable
 | CLK | 12 (SCK) |
 | CS | 10 |
 
+| Potentiometer (B10K) | ESP32-S3 |
+|----------------------|----------|
+| Left | GND |
+| Middle (wiper) | GPIO 4 |
+| Right | 3.3V |
+
+| Passive Buzzer | ESP32-S3 |
+|----------------|----------|
+| + | GPIO 5 |
+| − | GND |
+
 Touch input: GPIO 14 (touch the bare pin to toggle modes)
+
+The potentiometer and buzzer are optional — the firmware works without them. With no potentiometer connected, brightness stays at the default level (2/15). The onboard RGB LED (GPIO 48) lights blue during network fetches.
 
 ## Setup
 
@@ -146,3 +164,6 @@ Tunables at the top of `src/main.cpp`:
 | `FETCH_INTERVAL_MS` | 5 min | Stock quote refresh interval |
 | `MAX_DEVICES` | 4 | Number of 8x8 LED modules |
 | `TOUCH_THRESHOLD` | 30000 | Capacitive touch sensitivity |
+| `BRIGHTNESS_PIN` | 4 | ADC pin for potentiometer |
+| `BUZZER_PIN` | 5 | Passive buzzer output pin |
+| `RGB_LED_PIN` | 48 | Onboard NeoPixel for fetch indicator |
