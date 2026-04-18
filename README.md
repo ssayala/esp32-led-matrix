@@ -10,7 +10,7 @@ Scrolling message board and stock ticker using a Freenove ESP32-S3 and a DIYable
 - No secrets at build time — WiFi credentials and API key configured via BLE and stored in NVS
 - Bluetooth (BLE) control — update WiFi, API key, stock symbols, messages, and display mode wirelessly
 - Companion [iOS app](ios/README.md) (SwiftUI + CoreBluetooth) mirrors the Python CLI
-- Touch-to-toggle between stocks and messages (capacitive touch on GPIO 14)
+- Touch-to-cycle through stocks, messages, weather, and all modes (capacitive touch on GPIO 14)
 - Analog brightness control via potentiometer (optional)
 - Audible beep on BLE command received via passive buzzer (optional)
 - Onboard RGB LED lights blue during network fetches
@@ -99,10 +99,11 @@ uv run tools/led.py messages "Take a break!" "Drink water!" "Stand up!"
 # Set weather locations (zip codes or "City, State" to disambiguate)
 uv run tools/led.py locations "Seattle, WA" "Redmond, WA" 98052
 
-# Switch display mode
+# Switch display mode (all = round-robin across stocks, messages, weather)
 uv run tools/led.py mode stocks
 uv run tools/led.py mode messages
 uv run tools/led.py mode weather
+uv run tools/led.py mode all
 
 # Update WiFi credentials and reconnect (SSID may contain spaces)
 uv run tools/led.py wifi My Network Name password123
@@ -118,7 +119,7 @@ uv run tools/led.py reload
 uv run tools/led.py reset
 ```
 
-The physical touch pin on GPIO 14 also toggles between stocks and messages.
+The physical touch pin on GPIO 14 cycles through stocks, messages, weather, and all.
 
 ### BLE Service UUIDs
 
@@ -137,7 +138,7 @@ For building a custom app (e.g. iOS with CoreBluetooth):
 
 Payload formats:
 - **Tickers:** comma-separated symbols — `AAPL,MSFT,GOOGL`
-- **Mode:** `stocks`, `messages`, or `weather`
+- **Mode:** `stocks`, `messages`, `weather`, or `all` (round-robin through the other three, one full pass of each per cycle)
 - **Messages:** pipe-separated strings — `Take a break!|Drink water!|Stand up!` (max 511 bytes)
 - **Locations:** pipe-separated zip codes or `City, State` strings — `Seattle, WA|98052|Redmond, WA`. The device geocodes each via Open-Meteo on first fetch and caches the result; when a query contains a trailing `, XX`, the `XX` is used as a state/region filter to disambiguate duplicate city names.
 - **Command:** `reload` (force stock refresh) or `reset` (clear NVS, revert to `config.h` defaults)

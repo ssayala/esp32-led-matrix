@@ -1,7 +1,7 @@
 import Foundation
 
 enum Mode: String, CaseIterable {
-    case stocks, messages, weather
+    case stocks, messages, weather, all
 }
 
 enum PayloadError: Error, Equatable, CustomStringConvertible {

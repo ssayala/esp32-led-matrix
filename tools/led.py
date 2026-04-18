@@ -11,6 +11,7 @@ Usage:
     uv run tools/led.py locations "Seattle, WA" 98052
     uv run tools/led.py mode stocks
     uv run tools/led.py mode messages
+    uv run tools/led.py mode all
 """
 
 import asyncio
@@ -77,8 +78,8 @@ def cmd_messages(args):
 
 
 def cmd_mode(args):
-    if not args or args[0] not in ("stocks", "messages", "weather"):
-        print("Usage: led.py mode stocks|messages|weather")
+    if not args or args[0] not in ("stocks", "messages", "weather", "all"):
+        print("Usage: led.py mode stocks|messages|weather|all")
         sys.exit(1)
     asyncio.run(send(MODE_CHAR_UUID, args[0]))
 
@@ -180,7 +181,7 @@ if __name__ == "__main__":
         print("  tickers   AAPL MSFT GOOGL         set stock symbols and reload quotes")
         print("  messages  'msg1' 'msg2' ...        set scrolling messages (persisted)")
         print("  locations 'Seattle, WA' 98052 ...  set weather locations (zip or city)")
-        print("  mode      stocks|messages|weather  switch display mode")
+        print("  mode      stocks|messages|weather|all  switch display mode")
         print("  apikey    KEY                      set Finnhub API key")
         print(
             "  wifi      SSID PASSWORD             update WiFi credentials and reconnect"

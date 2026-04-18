@@ -178,6 +178,7 @@ final class PayloadsTests: XCTestCase {
         XCTAssertEqual(String(data: Payloads.mode(.stocks), encoding: .utf8), "stocks")
         XCTAssertEqual(String(data: Payloads.mode(.messages), encoding: .utf8), "messages")
         XCTAssertEqual(String(data: Payloads.mode(.weather), encoding: .utf8), "weather")
+        XCTAssertEqual(String(data: Payloads.mode(.all), encoding: .utf8), "all")
         XCTAssertEqual(String(data: Payloads.command("reload"), encoding: .utf8), "reload")
         XCTAssertEqual(String(data: Payloads.command("reset"), encoding: .utf8), "reset")
     }
@@ -232,6 +233,7 @@ final class PayloadsTests: XCTestCase {
     func test_parseMode_validValues() {
         XCTAssertEqual(Payloads.parseMode(Data("stocks".utf8)), .stocks)
         XCTAssertEqual(Payloads.parseMode(Data("messages".utf8)), .messages)
+        XCTAssertEqual(Payloads.parseMode(Data("all".utf8)), .all)
     }
 
     func test_parseMode_invalidReturnsNil() {

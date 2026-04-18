@@ -15,8 +15,12 @@ enum {
   MODE_STOCKS,
   MODE_MESSAGES,
   MODE_WEATHER,
+  MODE_ALL,
   MODE_COUNT
 };
+// MODE_ALL cycles internally through the three content modes. allSubMode
+// is restricted to {MODE_STOCKS, MODE_MESSAGES, MODE_WEATHER}.
+#define SUB_MODE_COUNT 3
 extern int currentMode;
 
 // --- Hardware & Display Config ---
@@ -422,6 +426,8 @@ static const char* modeName(int m) {
     return "messages";
   case MODE_WEATHER:
     return "weather";
+  case MODE_ALL:
+    return "all";
   }
   return "?";
 }
@@ -913,6 +919,8 @@ unsigned long lastTouchTime = 0;
 unsigned long lastTouchPoll = 0;
 static uint32_t touchBaseline = 0;
 
+void enterAllMode();
+
 void calibrateTouch() {
   uint32_t sum = 0;
   for (int i = 0; i < 16; i++) {
@@ -932,6 +940,8 @@ void checkTouch() {
   uint32_t val = touchRead(TOUCH_PIN);
   if (val > touchBaseline + TOUCH_DELTA && millis() - lastTouchTime > 2000) {
     currentMode = (currentMode + 1) % MODE_COUNT;
+    if (currentMode == MODE_ALL)
+      enterAllMode();
     lastTouchTime = millis();
     Serial.printf("Touch: mode -> %s\n", modeName(currentMode));
   }
@@ -972,6 +982,50 @@ void showNextWeather() {
   scrollText(scrollBuf);
 }
 
+// Sub-mode within MODE_ALL. Advances when the current category wraps so
+// that each category shows every item once per cycle.
+int allSubMode = MODE_STOCKS;
+
+static bool stocksAvailable() {
+  return wifiConfigured() && apiKeyConfigured() && stockCount > 0;
+}
+
+static bool weatherAvailable() {
+  return wifiConfigured() && weatherCount > 0;
+}
+
+static bool subModeHasData(int m) {
+  if (m == MODE_STOCKS)
+    return stocksAvailable();
+  if (m == MODE_WEATHER)
+    return weatherAvailable();
+  return true; // messages always has fallback text
+}
+
+static void advanceAllSubMode() {
+  for (int i = 0; i < SUB_MODE_COUNT; i++) {
+    allSubMode = (allSubMode + 1) % SUB_MODE_COUNT;
+    if (subModeHasData(allSubMode))
+      break;
+  }
+  // Reset the index so the new sub-mode shows its full cycle.
+  if (allSubMode == MODE_STOCKS)
+    currentStock = 0;
+  else if (allSubMode == MODE_WEATHER)
+    currentWeather = 0;
+  else
+    currentMsg = 0;
+}
+
+void enterAllMode() {
+  allSubMode = MODE_STOCKS;
+  currentStock = 0;
+  currentMsg = 0;
+  currentWeather = 0;
+  if (!subModeHasData(allSubMode))
+    advanceAllSubMode();
+}
+
 void showNext() {
   if (currentMode == MODE_STOCKS) {
     if (!wifiConfigured()) {
@@ -999,6 +1053,29 @@ void showNext() {
       return;
     }
     showNextWeather();
+    return;
+  }
+  if (currentMode == MODE_ALL) {
+    // Availability can change between frames (e.g. fetch completes, WiFi
+    // drops). Skip ahead if the current sub-mode has gone empty.
+    if (!subModeHasData(allSubMode))
+      advanceAllSubMode();
+
+    if (allSubMode == MODE_STOCKS) {
+      showNextStock();
+      if (currentStock == 0)
+        advanceAllSubMode();
+    }
+    else if (allSubMode == MODE_WEATHER) {
+      showNextWeather();
+      if (currentWeather == 0)
+        advanceAllSubMode();
+    }
+    else {
+      showNextMsg();
+      if (currentMsg == 0)
+        advanceAllSubMode();
+    }
     return;
   }
   showNextMsg();
@@ -1117,6 +1194,10 @@ void applyPendingMode() {
     currentMode = MODE_MESSAGES;
   else if (strcmp(pendingModeStr, "weather") == 0)
     currentMode = MODE_WEATHER;
+  else if (strcmp(pendingModeStr, "all") == 0) {
+    currentMode = MODE_ALL;
+    enterAllMode();
+  }
   else {
     Serial.printf("BLE: unknown mode \"%s\", ignoring\n", pendingModeStr);
     return;
