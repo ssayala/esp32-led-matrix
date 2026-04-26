@@ -16,7 +16,6 @@ enum {
   MODE_MESSAGES,
   MODE_WEATHER,
   MODE_ALL,
-  MODE_COUNT
 };
 // MODE_ALL cycles internally through the three content modes. allSubMode
 // is restricted to {MODE_STOCKS, MODE_MESSAGES, MODE_WEATHER}.
@@ -27,17 +26,11 @@ extern int currentMode;
 
 #define HARDWARE_TYPE MD_MAX72XX::FC16_HW
 #define MAX_DEVICES 4
-#define DIN_PIN 11
-#define CLK_PIN 12
-#define CS_PIN 10
-#define TOUCH_PIN 14
-#define TOUCH_THRESHOLD 30000
-#define SCROLL_SPEED 50
-#define BRIGHTNESS_PIN 4
-#define BRIGHTNESS_POLL_MS 200
-#define BRIGHTNESS_DEADBAND 2
+#define DIN_PIN 6
+#define CLK_PIN 4
+#define CS_PIN 5
+#define SCROLL_SPEED 60
 #define RGB_LED_PIN 48
-#define BUZZER_PIN 5
 
 Preferences prefs; // used on Core 1 only (setup + BLE apply handlers)
 
@@ -110,17 +103,6 @@ bool apiKeyConfigured() { return nvsApiKey[0] != '\0'; }
 #define MAX_MESSAGES 10
 #define MAX_STOCKS 10
 #define FETCH_INTERVAL_MS (5 * 60 * 1000)
-
-// --- Buzzer ---
-
-volatile bool beepPending = false;
-
-void checkBeep() {
-  if (!beepPending)
-    return;
-  beepPending = false;
-  tone(BUZZER_PIN, 2000, 100);
-}
 
 // --- Status LED ---
 
@@ -282,34 +264,11 @@ ResolvedLocation resolved[MAX_LOCATIONS];
 struct WeatherReading {
   char name[MAX_LOC_NAME_LEN];
   float tempF;
-  int wmo;
 };
 
 WeatherReading weatherReadings[MAX_LOCATIONS];
 int weatherCount = 0;
 int currentWeather = 0;
-
-static const char* wmoToString(int code) {
-  if (code == 0)
-    return "Clear";
-  if (code <= 3)
-    return "Cloudy";
-  if (code == 45 || code == 48)
-    return "Fog";
-  if (code >= 51 && code <= 57)
-    return "Drizzle";
-  if (code >= 61 && code <= 67)
-    return "Rain";
-  if (code >= 71 && code <= 77)
-    return "Snow";
-  if (code >= 80 && code <= 82)
-    return "Showers";
-  if (code == 85 || code == 86)
-    return "Snow";
-  if (code >= 95)
-    return "Storm";
-  return "?";
-}
 
 void saveLocationsToNVS() {
   prefs.begin("locs", false);
@@ -397,7 +356,6 @@ class TickerCallbacks : public NimBLECharacteristicCallbacks {
       memcpy(pendingTickerStr, val.c_str(), val.length());
       pendingTickerStr[val.length()] = '\0';
       tickerUpdatePending = true;
-      beepPending = true;
       lastBLEFetchMs = millis();
     }
   }
@@ -439,7 +397,6 @@ class ModeCallbacks : public NimBLECharacteristicCallbacks {
       memcpy(pendingModeStr, val.c_str(), val.length());
       pendingModeStr[val.length()] = '\0';
       modeUpdatePending = true;
-      beepPending = true;
     }
   }
 
@@ -456,7 +413,6 @@ class MsgsCallbacks : public NimBLECharacteristicCallbacks {
       memcpy(pendingMsgsStr, val.c_str(), val.length());
       pendingMsgsStr[val.length()] = '\0';
       msgsUpdatePending = true;
-      beepPending = true;
     }
   }
 
@@ -485,7 +441,6 @@ class WifiCallbacks : public NimBLECharacteristicCallbacks {
       memcpy(pendingWifiStr, val.c_str(), val.length());
       pendingWifiStr[val.length()] = '\0';
       wifiUpdatePending = true;
-      beepPending = true;
     }
   }
 
@@ -502,7 +457,6 @@ class ApiKeyCallbacks : public NimBLECharacteristicCallbacks {
       memcpy(pendingApiKey, val.c_str(), val.length());
       pendingApiKey[val.length()] = '\0';
       apiKeyUpdatePending = true;
-      beepPending = true;
     }
   }
 
@@ -522,7 +476,6 @@ class LocsCallbacks : public NimBLECharacteristicCallbacks {
       memcpy(pendingLocsStr, val.c_str(), val.length());
       pendingLocsStr[val.length()] = '\0';
       locsUpdatePending = true;
-      beepPending = true;
       lastBLEFetchMs = millis();
     }
   }
@@ -559,7 +512,6 @@ class CmdCallbacks : public NimBLECharacteristicCallbacks {
     memcpy(pendingCmd, val.c_str(), val.length());
     pendingCmd[val.length()] = '\0';
     cmdPending = true;
-    beepPending = true;
     if (fetchCmd)
       lastBLEFetchMs = millis();
   }
@@ -839,7 +791,7 @@ static void fetchWeatherImpl() {
     char url[256];
     snprintf(url, sizeof(url),
       "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
-      "&current=temperature_2m,weather_code&temperature_unit=fahrenheit",
+      "&current=temperature_2m&temperature_unit=fahrenheit",
       resolved[i].lat, resolved[i].lon);
 
     http.begin(url);
@@ -860,9 +812,8 @@ static void fetchWeatherImpl() {
     strncpy(tmp[count].name, resolved[i].name, MAX_LOC_NAME_LEN - 1);
     tmp[count].name[MAX_LOC_NAME_LEN - 1] = '\0';
     tmp[count].tempF = doc["current"]["temperature_2m"];
-    tmp[count].wmo = doc["current"]["weather_code"];
-    Serial.printf("Weather: %s %.0fF %s\n",
-      tmp[count].name, tmp[count].tempF, wmoToString(tmp[count].wmo));
+    Serial.printf("Weather: %s %.0fF\n",
+      tmp[count].name, tmp[count].tempF);
     count++;
   }
 
@@ -887,67 +838,11 @@ void triggerFetch(bool force = false) {
   xTaskNotify(fetchTaskHandle, (uint32_t)force, eSetValueWithOverwrite);
 }
 
-// --- Brightness Knob ---
+// --- Display Rotation ---
 
-static unsigned long lastBrightnessPoll = 0;
-static int currentBrightness = 2;
-
-void checkBrightness() {
-  if (millis() - lastBrightnessPoll < BRIGHTNESS_POLL_MS)
-    return;
-  lastBrightnessPoll = millis();
-
-  int raw = analogRead(BRIGHTNESS_PIN);
-  // Floating pin reads near 0 with pull-down — ignore until knob is connected
-  if (raw < 50)
-    return;
-
-  int level = map(raw, 0, 4095, 0, 15);
-  if (abs(level - currentBrightness) >= BRIGHTNESS_DEADBAND) {
-    currentBrightness = level;
-    display.setIntensity(level);
-    Serial.printf("Brightness: %d/15 (ADC %d)\n", level, raw);
-  }
-}
-
-// --- Touch Button ---
-
-#define TOUCH_DELTA 40000 // increase above baseline required to count as a touch
-
-int currentMode = MODE_STOCKS;
-unsigned long lastTouchTime = 0;
-unsigned long lastTouchPoll = 0;
-static uint32_t touchBaseline = 0;
-
+int currentMode = MODE_ALL;
 void enterAllMode();
 
-void calibrateTouch() {
-  uint32_t sum = 0;
-  for (int i = 0; i < 16; i++) {
-    sum += touchRead(TOUCH_PIN);
-    delay(10);
-  }
-  touchBaseline = sum / 16;
-  Serial.printf("Touch baseline: %lu (trigger above: %lu)\n",
-    touchBaseline, touchBaseline + TOUCH_DELTA);
-}
-
-void checkTouch() {
-  if (millis() - lastTouchPoll < 50)
-    return;
-  lastTouchPoll = millis();
-
-  uint32_t val = touchRead(TOUCH_PIN);
-  if (val > touchBaseline + TOUCH_DELTA && millis() - lastTouchTime > 2000) {
-    currentMode = (currentMode + 1) % MODE_COUNT;
-    if (currentMode == MODE_ALL)
-      enterAllMode();
-    lastTouchTime = millis();
-    Serial.printf("Touch: mode -> %s\n", modeName(currentMode));
-  }
-}
-
-// --- Display Rotation ---
 
 void showNextMsg() {
   int total = getTotalMessages();
@@ -977,8 +872,8 @@ void showNextWeather() {
 
   snprintf(scrollBuf, sizeof(scrollBuf),
     "%s %.0f\xB0"
-    "F %s",
-    w.name, w.tempF, wmoToString(w.wmo));
+    "F",
+    w.name, w.tempF);
   scrollText(scrollBuf);
 }
 
@@ -1338,14 +1233,12 @@ void setup() {
   xTaskCreatePinnedToCore(fetchTask, "fetchStocks", FETCH_TASK_STACK, nullptr, 1, &fetchTaskHandle, 0);
 
   initDisplay();
-  pinMode(BRIGHTNESS_PIN, INPUT_PULLDOWN);
-  pinMode(BUZZER_PIN, OUTPUT);
-  calibrateTouch();
   loadWifiFromNVS();
   loadApiKeyFromNVS();
   loadMessagesFromNVS();
   loadTickersFromNVS();
   loadLocationsFromNVS();
+  enterAllMode();
   showNext();
 
   connectWifi();
@@ -1371,9 +1264,6 @@ void loop() {
   if (locsUpdatePending)
     applyPendingLocations();
 
-  checkTouch();
-  checkBrightness();
-  checkBeep();
   updateStatusLed();
 
   if (display.displayAnimate()) {
